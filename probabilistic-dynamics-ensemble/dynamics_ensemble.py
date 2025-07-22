@@ -4,21 +4,43 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from typing import Dict, List, Union, Tuple, Optional, Callable
-from utils import Logger, StandardScaler
+# from utils import Logger, StandardScaler
+from ReLCE.utils.logger import Logger, make_log_dirs
+from ReLCE.utils.scaler import StandardScaler
 
-# uncomment these for training dynamics directly through main
-#from ResidualRL.utils.logger import Logger
-#from ResidualRL.utils.scaler import StandardScaler
-#from ResidualRL.offline_policy.buffer import OfflineDatasetLoader
+class Swish(nn.Module):
+    '''A smooth, non-linear activation function.
+    '''
+    def __init__(self) -> None:
+        super(Swish, self).__init__()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x * torch.sigmoid(x)
+        return x
+
+def soft_clamp(
+    x : torch.Tensor,
+    _min: Optional[torch.Tensor] = None,
+    _max: Optional[torch.Tensor] = None
+) -> torch.Tensor:
+    '''A differentiable version of clamping - keeps logvar (log-variance)
+    predictions within a certain range while preserving gradients.
+    '''
+    # clamp tensor values while mataining the gradient
+    if _max is not None:
+        x = _max - F.softplus(_max - x)
+    if _min is not None:
+        x = _min + F.softplus(x - _min)
+    return x
 
 '''
-Implements an ensemble of neural networks to predict environment dynamics — i.e., given a current state and action, the model predicts:
+Implements an ensemble of neural networks to predict environment dynamics,
+i.e., given a current state and action, the model predicts:
 - the next state delta (i.e., next_state - current_state)
 - the reward
 - and optionally, uncertainty estimates (via predicted log-variance)
 Ensemble models like this are commonly used in algorithms such as PETS, MOPO, COMBO, etc., to handle epistemic uncertainty.
 '''
-
 # code adpoted from https://github.com/yihaosun1124/OfflineRL-Kit/blob/main/offlinerlkit/nets/ensemble_linear.py
 # to create num_ensemble separate linear layers, each learning different dynamics
 # (e.g., for uncertainty modeling in model-based reinforcement learning)
@@ -77,34 +99,6 @@ class EnsembleLinear(nn.Module):
     def get_decay_loss(self) -> torch.Tensor:
         decay_loss = self.weight_decay * (0.5*((self.weight**2).sum()))
         return decay_loss
-
-
-class Swish(nn.Module):
-    '''A smooth, non-linear activation function.
-    '''
-    def __init__(self) -> None:
-        super(Swish, self).__init__()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x * torch.sigmoid(x)
-        return x
-
-
-def soft_clamp(
-    x : torch.Tensor,
-    _min: Optional[torch.Tensor] = None,
-    _max: Optional[torch.Tensor] = None
-) -> torch.Tensor:
-    '''A differentiable version of clamping - keeps logvar (log-variance)
-    predictions within a certain range while preserving gradients.
-    '''
-    # clamp tensor values while mataining the gradient
-    if _max is not None:
-        x = _max - F.softplus(_max - x)
-    if _min is not None:
-        x = _min + F.softplus(x - _min)
-    return x
-
 
 # code adopted from https://github.com/yihaosun1124/OfflineRL-Kit/blob/main/offlinerlkit/modules/dynamics_module.py
 class EnsembleDynamicsModel(nn.Module):
@@ -270,6 +264,7 @@ class EnsembleDynamics:
         mean, logvar = self.model(obs_act)
         mean = mean.cpu().numpy()
         logvar = logvar.cpu().numpy()
+        # next_obs = obs + Δobs
         mean[..., :-1] += obs
         std = np.sqrt(np.exp(logvar))
 
@@ -294,7 +289,6 @@ class EnsembleDynamics:
         Target: delta_obs + reward
         '''
         # print(next(iter(data.items())))
-
         # observations
         # actions
         # terminals
@@ -463,37 +457,59 @@ class EnsembleDynamics:
     def save(self, save_path: str) -> None:
         torch.save(self.model.state_dict(), os.path.join(save_path, "dynamics.pth"))
         self.scaler.save_scaler(save_path)
+        # TODO: save loss, other metrics to json
 
     def load(self, load_path: str) -> None:
         self.model.load_state_dict(torch.load(os.path.join(load_path, "dynamics.pth"), map_location=self.model.device))
         self.scaler.load_scaler(load_path)
 
-def main():
-    '''
-    In order to train dynamics directly through main(), comment all
-    of the contents of ResidualRL.utils.__init__.py file.
-    Make sure to uncomment them in order to train dynamics
-    via train_offline_policy.py
-    '''
+def train_dynamics_model():
     import argparse
     import random
-    from ResidualRL.utils.termination_fns import get_termination_fn
-    from ResidualRL.utils.logger import make_log_dirs
+    from ReLCE.utils.termination_fns import get_termination_fn
+    # from ReLCE.utils.logger import Logger, make_log_dirs
+    from ReLCE.offline_policy.buffer import OfflineDatasetLoader
+    # from ReLCE.utils.scaler import StandardScaler
 
-    import wandb
     from datetime import datetime
+    import wandb
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", type=str, default="go1")
-    parser.add_argument("--seed", type=int, default=10)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--obs_dim", type=int, default=58)
+    parser.add_argument("--action_dim", type=int, default=12)
     parser.add_argument("--dynamics-lr", type=float, default=1e-3)
     parser.add_argument("--dynamics-hidden-dims", type=int, nargs='*', default=[200, 200, 200, 200])
     parser.add_argument("--dynamics-weight-decay", type=float, nargs='*', default=[2.5e-5, 5e-5, 7.5e-5, 7.5e-5, 1e-4])
     parser.add_argument("--n-ensemble", type=int, default=7)
     parser.add_argument("--n-elites", type=int, default=5)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument('--run-name', type=str, default='', help='used for logging to distingush different runs')
+    parser.add_argument('--run-name', type=str, default=datetime.now().strftime("run_%Y%m%d-%H%M%S"), help='used for logging to distingush different runs')
+
     args = parser.parse_args()
+
+    config = {
+        "dynamic_module": {
+            "hidden_dims": args.dynamics_hidden_dims,
+            "lr": args.dynamics_lr,
+            "num_ensemble": args.n_ensemble,
+            "num_elites": args.n_elites,
+            "weight_decay": args.dynamics_weight_decay,
+            "termination_fn": args.task,
+            "class": "EnsembleDynamics",
+            },
+        "meta": {
+            "device": args.device
+            }
+        }
+
+    wandb.init(
+        project="anubhav1772-itmo-university",
+        name=f"DYN_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+        config = config,
+        resume="never", # fresh run
+    )
 
     # seed
     random.seed(args.seed)
@@ -501,15 +517,13 @@ def main():
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     torch.backends.cudnn.deterministic = True
-    # env.seed(args.seed)
+    torch.backends.cudnn.benchmark = False
 
-    # clear unused GPU memory
+    # Clear unused GPU memory
     torch.cuda.empty_cache()
 
-    obs_dim, action_dim = 58, 12
-
-    # logger
-    log_dirs = make_log_dirs(args.task, 'combo', args.seed, vars(args), run_name=args.run_name)
+    # Logger
+    log_dirs = make_log_dirs(args.task, 'combo/test/dynamics', args.seed, vars(args), run_name=args.run_name)
     output_config = {
         "consoleout_backup": "stdout",
         "policy_training_progress": "csv",
@@ -519,33 +533,20 @@ def main():
     logger = Logger(log_dirs, output_config)
     logger.log_hyperparameters(vars(args))
 
-    config = {
-        "dynamic_module": {
-            "obs_dim":obs_dim,
-            "action_dim":action_dim,
-            "hidden_dims": args.dynamics_hidden_dims,
-            "lr": args.dynamics_lr,
-            "num_ensemble": args.n_ensemble,
-            "num_elites": args.n_elites,
-            "weight_decay": args.dynamics_weight_decay,
-            "termination_fn": args.task,
-            "class": "EnsembleDynamics",
-        }
-    }
+    # retrain flag provide flexibility while testing
+    # when model already exists but still we want retraining,
+    # we can set it to True
+    retrain = True
+    dynamic_model_path = os.path.join(logger.model_dir, f"dynamics_{args.seed}.pth")
+    print(dynamic_model_path)
 
-    wandb.init(
-        project="anubhav1772-itmo-university",
-        name=f"RES_DYNAMICS_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-        config=config
-    )
-
-    data = OfflineDatasetLoader().get_dataset('dataset_0808')
+    # Go1 Offline Data
+    data = OfflineDatasetLoader().get_dataset('dataset/go1')
     for key, value in data.items():
     	print(f"{key}: {value.shape}")
 
-    # dynamic model and training
     dynamics = EnsembleDynamics(
-        obs_dim, action_dim,
+        args.obs_dim, args.action_dim,
         args.dynamics_hidden_dims,
         args.dynamics_lr,
         get_termination_fn(args.task),
@@ -554,8 +555,15 @@ def main():
         weight_decays=args.dynamics_weight_decay,
         device=args.device)
 
-    dynamics.train(data, wandb, logger)
+    if os.path.isfile(dynamic_model_path) and retrain == False:
+        print(f"Trained dynamics exists at {logger.model_dir}, loading...")
+        dynamics.load(logger.model_dir)
+        print("Load successful!!")
+    else:
+        # dynamic training
+        print("Starting dynamics model training...")
+        dynamics.train(data, wandb, logger)
 
-if __name__== '__main__':
-    main()
+if __name__ == '__main__':
+    train_dynamics_model()
 
