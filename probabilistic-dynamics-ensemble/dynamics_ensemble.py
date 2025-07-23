@@ -5,8 +5,8 @@ import torch.nn as nn
 from torch.nn import functional as F
 from typing import Dict, List, Union, Tuple, Optional, Callable
 # from utils import Logger, StandardScaler
-from ReLCE.utils.logger import Logger, make_log_dirs
-from ReLCE.utils.scaler import StandardScaler
+from utils.logger import Logger, make_log_dirs
+from utils.scaler import StandardScaler
 
 class Swish(nn.Module):
     '''A smooth, non-linear activation function.
@@ -33,17 +33,7 @@ def soft_clamp(
         x = _min + F.softplus(x - _min)
     return x
 
-'''
-Implements an ensemble of neural networks to predict environment dynamics,
-i.e., given a current state and action, the model predicts:
-- the next state delta (i.e., next_state - current_state)
-- the reward
-- and optionally, uncertainty estimates (via predicted log-variance)
-Ensemble models like this are commonly used in algorithms such as PETS, MOPO, COMBO, etc., to handle epistemic uncertainty.
-'''
 # code adpoted from https://github.com/yihaosun1124/OfflineRL-Kit/blob/main/offlinerlkit/nets/ensemble_linear.py
-# to create num_ensemble separate linear layers, each learning different dynamics
-# (e.g., for uncertainty modeling in model-based reinforcement learning)
 class EnsembleLinear(nn.Module):
     '''A fully-connected linear layer, but implemented as a stack of num_ensemble independent layers.
     Each ensemble member has its own weights and biases.
@@ -129,7 +119,7 @@ class EnsembleDynamicsModel(nn.Module):
         self._with_reward = with_reward
         self.activation = activation()
         # Each layer contributes to the final prediction, so overfitting in any layer
-        # can degrade model performance. That's weight decay is important for every layer
+        # can degrade model performance. That's why weight decay is important for every layer
         # hidden layers + output layer
         assert len(weight_decays) == (len(hidden_dims) + 1)
 
@@ -207,7 +197,6 @@ class EnsembleDynamicsModel(nn.Module):
     def random_elite_idxs(self, batch_size: int) -> np.ndarray:
         idxs = np.random.choice(self.elites.data.cpu().numpy(), size=batch_size)
         return idxs
-
 
 # code adopted from https://github.com/yihaosun1124/OfflineRL-Kit/blob/main/offlinerlkit/dynamics/ensemble_dynamics.py
 class EnsembleDynamics:
@@ -466,10 +455,10 @@ class EnsembleDynamics:
 def train_dynamics_model():
     import argparse
     import random
-    from ReLCE.utils.termination_fns import get_termination_fn
-    # from ReLCE.utils.logger import Logger, make_log_dirs
-    from ReLCE.offline_policy.buffer import OfflineDatasetLoader
-    # from ReLCE.utils.scaler import StandardScaler
+    from utils.termination_fns import get_termination_fn
+    # from utils.logger import Logger, make_log_dirs
+    from utils.buffer import OfflineDatasetLoader
+    # from utils.scaler import StandardScaler
 
     from datetime import datetime
     import wandb
@@ -523,7 +512,7 @@ def train_dynamics_model():
     torch.cuda.empty_cache()
 
     # Logger
-    log_dirs = make_log_dirs(args.task, 'combo/test/dynamics', args.seed, vars(args), run_name=args.run_name)
+    log_dirs = make_log_dirs(args.task, 'test/dynamics', args.seed, vars(args), run_name=args.run_name)
     output_config = {
         "consoleout_backup": "stdout",
         "policy_training_progress": "csv",
@@ -543,7 +532,7 @@ def train_dynamics_model():
     # Go1 Offline Data
     data = OfflineDatasetLoader().get_dataset('dataset/go1')
     for key, value in data.items():
-    	print(f"{key}: {value.shape}")
+        print(f"{key}: {value.shape}")
 
     dynamics = EnsembleDynamics(
         args.obs_dim, args.action_dim,
@@ -566,4 +555,3 @@ def train_dynamics_model():
 
 if __name__ == '__main__':
     train_dynamics_model()
-
