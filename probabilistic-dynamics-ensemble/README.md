@@ -17,7 +17,10 @@
   <tbody>
     <tr>
       <td><code>EnsembleLinear</code></td>
-      <td>A fully-connected linear layer, but implemented as a stack of <code>num_ensemble</code> independent layers, each learning different dynamics (e.g., for uncertainty modeling in MBRL). Each ensemble member has its own weights and biases.</td>
+      <td>A fully-connected linear layer, but implemented as a stack of <code>num_ensemble</code> independent layers, each learning different dynamics (e.g., for uncertainty modeling in MBRL). Each ensemble member has its own weights and biases.
+        <br><strong>Weight:</strong> <code>(num_ensemble, input_dim, output_dim)</code>
+        <br><strong>Bias:</strong> <code>(num_ensemble, 1, output_dim)</code>
+    <br>Uses torch.einsum for batched matrix multiplication.</td>
       <td>
         <ul>
           <li><code>forward(x)</code></li>
@@ -29,7 +32,7 @@
     </tr>
     <tr>
       <td><code>EnsembleDynamicsModel</code></td>
-      <td>A feedforward ensemble neural network with multiple hidden layers using EnsembleLinear. Output layer of size 2 * (obs_dim + reward_dim): First half is the predicted mean while second half is the predicted log variance (uncertainty).</td>
+      <td>A feedforward ensemble neural network with multiple hidden layers using EnsembleLinear. Output layer of size <code>2 * (obs_dim + reward_dim)</code>: First half is the predicted mean while second half is the predicted log variance (uncertainty).<br> Learnable clamp bounds: (<code>max_logvar</code>, <code>min_logvar</code>).<br> Tracks elite model indices (e.g., top-performing ones on holdout set).</td>
       <td>
         <ul>
           <li><code>forward(obs_action)</code></li>
@@ -43,7 +46,12 @@
     </tr>
     <tr>
       <td><code>EnsembleDynamics</code></td>
-      <td>Ensemble of neural networks for modeling environment dynamics, supports uncertainty estimation and elite selection.</td>
+      <td>
+        Trains an ensemble of neural networks to model environment dynamics.<br>
+        <strong>Input:</strong> observation (obs), action (act)<br>
+        <strong>Output:</strong> delta observation (<code>Δobs = next_obs - obs</code>), reward<br>
+        Supports uncertainty estimation (log variance) and elite model selection.
+      </td>
       <td>
         <ul>
           <li><code>step(obs, action)</code></li>
