@@ -1,5 +1,11 @@
 <h2>Module Documentation</h2>
-
+<p>Implements an ensemble of neural networks to predict environment dynamics, i.e., given a current state and action, the model predicts:</p>
+<ul>
+  <li>the next state delta (i.e., <code>next_state - current_state</code>)</li>
+  <li>the reward</li>
+  <li>and optionally, uncertainty estimates (via predicted log-variance)</li>
+</ul>
+<p>Ensemble models like this are commonly used in algorithms such as <strong>PETS</strong>, <strong>MOPO</strong>, <strong>COMBO</strong>, etc., to handle <em>epistemic uncertainty</em>.</p>
 <table>
   <thead>
     <tr>
@@ -11,7 +17,7 @@
   <tbody>
     <tr>
       <td><code>EnsembleLinear</code></td>
-      <td>A fully-connected linear layer, but implemented as a stack of num_ensemble independent layers. Each ensemble member has its own weights and biases.</td>
+      <td>A fully-connected linear layer, but implemented as a stack of <code>num_ensemble</code> independent layers, each learning different dynamics (e.g., for uncertainty modeling in MBRL). Each ensemble member has its own weights and biases.</td>
       <td>
         <ul>
           <li><code>forward(x)</code></li>
