@@ -1,7 +1,5 @@
-
 import numpy as np
 import torch
-
 
 class reward_aliengo(object):
     def __init__(self, action_dim, obs_dim = 51):
@@ -39,19 +37,15 @@ class reward_aliengo(object):
         self.base_ang_vel = self.root_ang_states[3:6]
         self.base_ang_acc = self.root_ang_states[6:9]
 
-        
     
-    #def calculate_reward(self,):
-    #    positive_reward = (0.8* self._reward_tracking_lin_vel()+0.7* self._reward_tracking_ang_vel())
-    #    negative_reward = (-0.02)*self._reward_lin_vel_z()+(-0.001)* self._reward_ang_vel_xy()+(-0.00005)*self._reward_torques()+(-2.5e-7)*self._reward_dof_acc()+(-0.01)*self._reward_action_rate()+(-1e-4)*self._reward_dof_vel()+(-0.1)*(self._reward_action_smoothness_1()+self._reward_action_smoothness_2())
-    #    reward = positive_reward * torch.exp(negative_reward)/10
-    #    return reward.numpy()
-    
-    # FOR GO1
+    # For Aliengo
     def calculate_reward(self,):
         positive_reward = (1* self._reward_tracking_lin_vel()+0.5* self._reward_tracking_ang_vel())
-        negative_reward = (-0.02)*self._reward_lin_vel_z()+(-0.001)* self._reward_ang_vel_xy()+(-0.0001)*self._reward_torques()+(-2.5e-7)*self._reward_dof_acc()+(-0.01)*self._reward_action_rate()+(-1e-4)*self._reward_dof_vel()+(-0.1)*(self._reward_action_smoothness_1()+(-0.1)*self._reward_action_smoothness_2())
-        reward = positive_reward * torch.exp(negative_reward)/10
+        negative_reward = (-0.02)*self._reward_lin_vel_z()+(-0.001)* self._reward_ang_vel_xy()+(-0.0001)*self._reward_torques() \
+                            +(-2.5e-7)*self._reward_dof_acc()+(-0.01)*self._reward_action_rate()+(-1e-4)*self._reward_dof_vel() \
+                            + (-0.0)*self._reward_orientation() \
+                            +(-0.1)*(self._reward_action_smoothness_1()+(-0.1)*self._reward_action_smoothness_2())
+        reward = positive_reward * torch.exp(negative_reward * 0.02)
         return reward.numpy()
 
 
@@ -60,8 +54,8 @@ class reward_aliengo(object):
     # def _reward_base_height(self):
     #     # Tracking of linear velocity commands (xy axes)
     #     height_error = torch.square(self.env.cfg.rewards.base_height_target - self.env.root_states[:, 0, 2])
-
     #     return height_error
+
     # def _reward_orientation(self):
     #     # Penalize non flat base orientation
     #     return torch.sum(torch.square(self.projected_gravity[:, :2]), dim=1)
@@ -84,10 +78,10 @@ class reward_aliengo(object):
         # Penalize xy axes base angular velocity
         return torch.sum(torch.square(self.base_ang_vel[:2]))
 
-    # def _reward_orientation(self):
-    #     # Penalize non flat base orientation
-    #     # return torch.sum(torch.square(self.env.projected_gravity[:, :2]))
-    #     return torch.sum(torch.square(self.rpy[0])+torch.square(self.rpy[1]))
+    def _reward_orientation(self):
+        # Penalize non flat base orientation
+        # return torch.sum(torch.square(self.env.projected_gravity[:, :2]))
+        return torch.sum(torch.square(self.rpy[0])+torch.square(self.rpy[1]))
 
     def _reward_torques(self):
         # Penalize torques
