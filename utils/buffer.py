@@ -20,8 +20,8 @@ class OfflineDatasetLoader:
         super().__init__()
 
     def get_dataset(self, data_load_path: str):
-        ################ Load Real World Data #################
-        # data_load_path = 'dataset'
+        '''Load Real World Data 
+        '''
         buffer_save_path = os.path.join(data_load_path +'/aliengo_offline_data.pt')
         # print(buffer_save_path)
 
@@ -76,7 +76,6 @@ class OfflineDatasetLoader:
                         terminals = [False]*(len(observations)-1) + [True]
 
                         for i in range(len(actions)-1):
-                            # dy_length += 1
                             dataset['actions'].append(actions[i])
                             dataset['observations'].append(observations[:, :76][i])
                             dataset['terminals'].append(terminals[i])
@@ -89,8 +88,6 @@ class OfflineDatasetLoader:
         dataset['next_observations'] = np.array(dataset['next_observations'])
         dataset['terminals'] = np.array(dataset['terminals'])
         dataset['rewards'] = np.array(dataset['rewards']) / max_reward  # normalizing reward
-        # dataset['timeouts'] = np.array(dataset['timeouts'])
-
         return dataset
 
 #code adopted from https://github.com/yihaosun1124/OfflineRL-Kit/blob/main/offlinerlkit/buffer/buffer.py
