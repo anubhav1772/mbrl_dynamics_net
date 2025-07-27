@@ -1,4 +1,6 @@
-### code adopted from https://github.com/yihaosun1124/OfflineRL-Kit/blob/main/offlinerlkit/buffer/buffer.py
+# import isaacgym
+# assert isaacgym
+import torch
 import numpy as np
 from typing import Optional, Union, Tuple, Dict
 
@@ -6,9 +8,9 @@ import os
 import h5py
 from reward_aliengo_new import reward_aliengo
 
-# from go1_gym.envs.wrappers.history_wrapper import HistoryWrapper
-# from go1_gym.envs.go1.velocity_tracking import VelocityTrackingEasyEnv
-from ResidualRL.config_loader import get_configs
+# from aliengo_gym.envs.wrappers.history_wrapper import HistoryWrapper
+# from aliengo_gym.envs.aliengo.velocity_tracking import VelocityTrackingEasyEnv
+from config_loader import get_configs
 
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -19,8 +21,8 @@ class OfflineDatasetLoader:
 
     def get_dataset(self, data_load_path: str):
         ################ Load Real World Data #################
-        # data_load_path = 'dataset_0808'
-        buffer_save_path = os.path.join(data_load_path +'/go1_offline_data.pt')
+        # data_load_path = 'dataset'
+        buffer_save_path = os.path.join(data_load_path +'/aliengo_offline_data.pt')
         # print(buffer_save_path)
 
         if not os.path.exists(buffer_save_path):
@@ -59,41 +61,39 @@ class OfflineDatasetLoader:
                         actions = np.array(file['actions'])
                         actions = actions[:, :12]
                         observations = np.array(file['states'])
+                        # print(len(observations))    # num of steps in an episode
                         # print(len(observations[0])) # 76
+
                         # np.savetxt(r'test_{}'.format(str(filename)), [np.max(actions,axis=0), np.min(actions, axis=0),
                         #                                                 np.mean(actions, axis=0), np.std(actions, axis=0)], fmt='%.3f')
+                        
                         reward = self.compute_reward(observations, actions)
                         max_episode_reward = np.max(reward, axis=0)
-
                         if(max_reward < max_episode_reward):
                             max_reward = max_episode_reward
                         print('max: {}, min: {}, mean: {}, std: {}'.format(np.max(reward,axis=0), np.min(reward, axis=0), np.mean(reward, axis=0), np.std(reward, axis=0)))
 
                         terminals = [False]*(len(observations)-1) + [True]
-                        dy_length = 0
+
                         for i in range(len(actions)-1):
-                            dy_length += 1
+                            # dy_length += 1
                             dataset['actions'].append(actions[i])
-                            dataset['observations'].append(observations[:, :58][i])
+                            dataset['observations'].append(observations[:, :76][i])
                             dataset['terminals'].append(terminals[i])
                             dataset['rewards'].append(reward[i])
                             # Assign next observation (handling last timestep case)
-                            dataset['next_observations'].append(observations[:, :58][i+1] if i < len(actions) - 1 else observations[:, :58][i])
-                            if dy_length % traj_length == 0:
-                                dataset['timeouts'].append(True)
-                                dy_length = 0
-                            else:
-                                dataset['timeouts'].append(False)
+                            dataset['next_observations'].append(observations[:, :76][i+1] if i < len(actions) - 1 else observations[:, :76][i])
 
         dataset['actions'] = np.array(dataset['actions'])
         dataset['observations'] = np.array(dataset['observations'])
         dataset['next_observations'] = np.array(dataset['next_observations'])
         dataset['terminals'] = np.array(dataset['terminals'])
         dataset['rewards'] = np.array(dataset['rewards']) / max_reward  # normalizing reward
-        dataset['timeouts'] = np.array(dataset['timeouts'])
+        # dataset['timeouts'] = np.array(dataset['timeouts'])
 
         return dataset
 
+#code adopted from https://github.com/yihaosun1124/OfflineRL-Kit/blob/main/offlinerlkit/buffer/buffer.py
 class ReplayBuffer:
     def __init__(
         self,
@@ -181,14 +181,10 @@ class ReplayBuffer:
         }
 
 if __name__ == '__main__':
-    import isaacgym
-    assert isaacgym
-    import torch
-
     action_dim = 12
-    obs_dim = 58                                 # env.get_observations()['obs'].shape[1]
+    obs_dim = 76                                 # env.get_observations()['obs'].shape[1]
 
-    data_load_path = 'dataset_0808'
+    data_load_path = 'dataset/aliengo'
 
     dataset_loader = OfflineDatasetLoader()
     data = dataset_loader.get_dataset(data_load_path)
@@ -198,21 +194,12 @@ if __name__ == '__main__':
     # env = VelocityTrackingEasyEnv(sim_device='cuda:0', headless=True, cfg=get_configs())
     # env = HistoryWrapper(env)
 
-    buffer = ReplayBuffer(int(1e6), obs_dim, action_dim)
-    buffer.load_dataset(data)
-    samples = buffer.sample(64)
-    for key in samples.keys():
-        print(f"{key}: {samples[key].shape}")
-
-    # print(samples.keys())
-    # print(samples['observations'].shape)
-
-    # import d4rl, gym
-    # env = gym.make('hopper-medium-replay-v2')
-    # data = env.get_dataset()
-    # buffer = ReplayBuffer(int(1e6), env.observation_space.shape[0], env.action_space.shape[0])
+    # buffer = ReplayBuffer(int(1e6), obs_dim, action_dim)
     # buffer.load_dataset(data)
     # samples = buffer.sample(64)
+    # for key in samples.keys():
+    #     print(f"{key}: {samples[key].shape}")
+
     # print(samples.keys())
     # print(samples['observations'].shape)
 
