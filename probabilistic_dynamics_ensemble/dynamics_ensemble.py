@@ -14,6 +14,8 @@ from typing import Dict, List, Union, Tuple, Optional, Callable
 from mbrl_dynamics_net.utils.logger import Logger, make_log_dirs
 from mbrl_dynamics_net.utils.scaler import StandardScaler
 
+from torch.utils.tensorboard import SummaryWriter
+
 class Swish(nn.Module):
     '''A smooth, non-linear activation function.
     '''
@@ -253,7 +255,7 @@ class EnsembleDynamics:
         - Convert logvar to standard deviation.
         Returns (next_obs, reward, terminal, info)
         '''
-        "imagine single forward step"
+        #imagine single forward step
         obs_act = np.concatenate([obs, action], axis=-1)
         obs_act = self.scaler.transform(obs_act)
         mean, logvar = self.model(obs_act)
@@ -304,8 +306,9 @@ class EnsembleDynamics:
     def train(
         self,
         data: Dict,
-        wandb,
         logger: Logger,
+        wandb = None,
+        tensorboard_writer = None,
         max_epochs: Optional[float] = None,
         max_epochs_since_update: int = 5,
         batch_size: int = 256,
@@ -363,10 +366,14 @@ class EnsembleDynamics:
             logger.set_timestep(epoch)
             logger.dumpkvs(exclude=["policy_training_progress"])
 
-            wandb.log({'timestep': epoch,
-                'loss/dynamics_train_loss': train_loss,
-                'loss/dynamics_holdout_loss': holdout_loss,
-            })
+            if wandb is not None:
+                wandb.log({'timestep': epoch,
+                    'loss/dynamics_train_loss': train_loss,
+                    'loss/dynamics_holdout_loss': holdout_loss,
+                })
+            else:
+                tensorboard_writer.add_scalar("loss/dynamics_train_loss", train_loss, epoch)
+                tensorboard_writer.add_scalar("loss/dynamics_holdout_loss", holdout_loss, epoch)
 
             # Shuffle dataset for next epoch
             data_idxes = shuffle_rows(data_idxes)
@@ -470,8 +477,9 @@ def train_dynamics_model():
     import wandb
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--task", type=str, default="go1")
+    parser.add_argument("--task", type=str, default="aliengo")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--retrain", type=bool, default=True)
     parser.add_argument("--obs_dim", type=int, default=58)
     parser.add_argument("--action_dim", type=int, default=12)
     parser.add_argument("--dynamics-lr", type=float, default=1e-3)
@@ -499,14 +507,7 @@ def train_dynamics_model():
             }
         }
 
-    wandb.init(
-        project="anubhav1772-itmo-university",
-        name=f"DYN_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-        config = config,
-        resume="never", # fresh run
-    )
-
-    # seed
+    # Seed
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -519,6 +520,7 @@ def train_dynamics_model():
 
     # Logger
     log_dirs = make_log_dirs(args.task, 'test/dynamics', args.seed, vars(args), run_name=args.run_name)
+    print(f"log_dirs = {log_dirs}")
     output_config = {
         "consoleout_backup": "stdout",
         "policy_training_progress": "csv",
@@ -528,17 +530,37 @@ def train_dynamics_model():
     logger = Logger(log_dirs, output_config)
     logger.log_hyperparameters(vars(args))
 
+    use_wandb = True
+    try:
+        # Attempt to initialize wandb and start tracking
+        wandb.init(
+            project="anubhav1772-itmo-university",
+            name=f"DYN_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            config = config,
+            resume="never", # fresh run
+        )
+        print("W&B initialized successfully")
+    except wandb.errors.errors.CommError as e:
+        # In case of an error with wandb, catch the exception and use TensorBoard instead
+        print(f"W&B error occurred: {e}. \nUsing TensorBoard for logging instead.")
+        use_wandb = False
+
+        # # Generate dynamic log directory using timestamp
+        # tensorboard_log_dir = os.path.join("runs", f"DYN_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        tensorboard_writer = SummaryWriter(log_dir=log_dirs)
+
     # retrain flag provide flexibility while testing
     # when model already exists but still we want retraining,
     # we can set it to True
-    retrain = True
+    # retrain = True
     dynamic_model_path = os.path.join(logger.model_dir, f"dynamics_{args.seed}.pth")
     print(dynamic_model_path)
 
-    # Go1 Offline Data
-    data = OfflineDatasetLoader().get_dataset('dataset/go1')
+    # Aliengo Offline Data
+    data_load_path = 'dataset/PreprocessedDataset'
+    data = OfflineDatasetLoader().get_dataset(data_load_path, preprocess=True)
     for key, value in data.items():
-        print(f"{key}: {value.shape}")
+        print(f"{key}: {np.array(value).shape}")
 
     dynamics = EnsembleDynamics(
         args.obs_dim, args.action_dim,
@@ -550,14 +572,18 @@ def train_dynamics_model():
         weight_decays=args.dynamics_weight_decay,
         device=args.device)
 
-    if os.path.isfile(dynamic_model_path) and retrain == False:
+    if os.path.isfile(dynamic_model_path) and args.retrain == False:
         print(f"Trained dynamics exists at {logger.model_dir}, loading...")
         dynamics.load(logger.model_dir)
         print("Load successful!!")
     else:
         # dynamic training
         print("Starting dynamics model training...")
-        dynamics.train(data, wandb, logger)
+        if use_wandb:
+            dynamics.train(data, logger, wandb=wandb)
+        else:
+            dynamics.train(data, logger, tensorboard_writer=tensorboard_writer)
+            tensorboard_writer.close()
 
 if __name__ == '__main__':
     train_dynamics_model()
