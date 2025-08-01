@@ -227,11 +227,11 @@ class EnsembleDynamics:
         self.device = torch.device(device)
         # An ensemble of neural networks (instances of EnsembleDynamicsModel)
         self.model = EnsembleDynamicsModel(
-            obs_dim, action_dim, hidden_dims,
-            num_ensemble = num_ensemble,
-            num_elites = num_elites,
-            weight_decays=weight_decays,
-            device=self.device)
+                        obs_dim, action_dim, hidden_dims,
+                        num_ensemble = num_ensemble,
+                        num_elites = num_elites,
+                        weight_decays=weight_decays,
+                        device=self.device)
         self.optim = torch.optim.Adam(self.model.parameters(), learning_rate)
         # StandardScaler for normalizing inputs
         self.scaler = StandardScaler()
@@ -465,6 +465,53 @@ class EnsembleDynamics:
         self.model.load_state_dict(torch.load(os.path.join(load_path, "dynamics.pth"), map_location=self.model.device))
         self.scaler.load_scaler(load_path)
 
+# def rollout(init_obss: np.ndarray, rollout_length: int) -> Tuple[Dict[str, np.ndarray], Dict]:
+#     num_transitions = 0
+#     rewards_arr = np.array([])
+#     rollout_transitions = defaultdict(list)
+
+#     # rollout
+#     observations = init_obss
+#     for _ in range(rollout_length):
+#         if self._uniform_rollout:
+#             actions = np.random.uniform(
+#                 -1,
+#                 1,
+#                 size=(len(observations), self.action_dim)
+#             )
+#         else:
+#             actions = self.select_action(observations)
+#         next_observations, rewards, terminals, info = self.dynamics.step(observations, actions)
+#         rollout_transitions["obss"].append(observations)
+#         rollout_transitions["next_obss"].append(next_observations)
+#         rollout_transitions["actions"].append(actions)
+#         rollout_transitions["rewards"].append(rewards)
+#         rollout_transitions["terminals"].append(terminals)
+
+#         # tracks how many total transitions (not timesteps) were collected
+#         # since batch size may shrink over time after filtering terminal states
+#         # num_transitions is a sum of all transitions collected across all surviving batches
+#         # which is not the same as (rollout_length × initial_batch_size),
+#         # because some episodes terminate early and are excluded from later steps.
+#         num_transitions += len(observations)
+#         rewards_arr = np.append(rewards_arr, rewards.flatten())
+
+#         nonterm_mask = (~terminals).flatten()
+#         if nonterm_mask.sum() == 0:
+#             break
+
+#         # print(observations.shape)
+#         # print(next_observations.shape)
+#         # print(rewards.shape)
+#         # print(terminals.shape)
+#         observations = next_observations[nonterm_mask]
+
+#     for k, v in rollout_transitions.items():
+#         rollout_transitions[k] = np.concatenate(v, axis=0)
+
+#     return rollout_transitions, \
+#         {"num_transitions": num_transitions, "reward_mean": rewards_arr.mean()}
+
 def train_dynamics_model():
     import argparse
     import random
@@ -482,7 +529,7 @@ def train_dynamics_model():
     parser.add_argument("--retrain", type=bool, default=True)
     parser.add_argument("--obs_dim", type=int, default=58)
     parser.add_argument("--action_dim", type=int, default=12)
-    parser.add_argument("--dynamics-lr", type=float, default=1e-3)
+    parser.add_argument("--dynamics-lr", type=float, default=3e-4)
     parser.add_argument("--dynamics-hidden-dims", type=int, nargs='*', default=[200, 200, 200, 200])
     parser.add_argument("--dynamics-weight-decay", type=float, nargs='*', default=[2.5e-5, 5e-5, 7.5e-5, 7.5e-5, 1e-4])
     parser.add_argument("--n-ensemble", type=int, default=7)
@@ -557,7 +604,7 @@ def train_dynamics_model():
     print(dynamic_model_path)
 
     # Aliengo Offline Data
-    data_load_path = 'dataset/PreprocessedDataset'
+    data_load_path = 'dataset/PreprocessedDataset/train'
     data = OfflineDatasetLoader().get_dataset(data_load_path, preprocess=True)
     for key, value in data.items():
         print(f"{key}: {np.array(value).shape}")
