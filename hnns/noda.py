@@ -2,6 +2,11 @@ import torch
 import torch.nn as nn
 from torchdiffeq import odeint
 
+# Add the parent folder of `mbrl_dynamics_net` to Python path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
+from mbrl_dynamics_net.utils.buffer import OfflineDatasetLoader
+
 class AutoEncoder(nn.Module):
     def __init__(self, input_dim, latent_dim):  
         super(AutoEncoder, self).__init__()
@@ -83,21 +88,83 @@ class HamiltonianODE(nn.Module):
         du_dt = torch.stack(du_list, dim=0)
         return du_dt
 
+class RewardDecoder(nn.Module):
+    def __init__(self, latent_dim, action_dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(latent_dim + action_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1)
+        )
+
+    def forward(self, q, p, a):
+        u = torch.cat([q, p], dim=-1)
+        return self.net(torch.cat([u, a], dim=-1))  # shape: [B, 1]
+
+class NODA(nn.Module):
+    def __init__(self, input_dim, latent_dim, action_dim, device='gpu'):
+        super().__init__()
+        self.device = device
+        self.autoencoder = AutoEncoder(input_dim, latent_dim).to(device)
+        self.ode_func = HamiltonianODE(latent_dim, action_dim).to(device)
+        self.reward_decoder = RewardDecoder(latent_dim, action_dim).to(device)
+        self.latent_dim = latent_dim
+        self.action_dim = action_dim
+
+    def format_samples_for_training(self, data: Dict) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        obss = data["observations"]
+        actions = data["actions"]
+        next_obss = data["next_observations"]
+        rewards = data["rewards"].reshape(-1, 1)
+        return obss, actions, next_obss, rewards
+
+    def predict_state_reward(self, s_t, a_t, t_span=[0, 1]):
+        '''Predict next state and reward given current state and action.
+        '''
+        q, p, u = self.autoencoder.encode(s_t)
+        u_a = torch.cat([u, a_t], dim=-1)
+
+        t_span = torch.tensor(t_span, dtype=torch.float32).to(s_t.device)
+        u_a_traj = odeint(self.ode_func, u_a, t_span, method='rk4')
+
+        # Extract final state (t = 1)
+        u_a_next = u_a_traj[-1]             # Shape: (batch_size, latent_dim + action_dim)
+
+        # Separate latent state
+        u_next = u_a_next[:, :u.shape[1]]  # Extract u (latent state) part (drop action) 
+
+        # u_next = u_a_traj[-1][:, :self.latent_dim] 
+
+        s_t_plus1_pred = self.autoencoder.decode(u_next)
+        r_pred = self.reward_decoder(q, p, a_t)
+        return s_t_plus1_pred, r_pred
+
+    def compute_loss(self, s_t, a_t, s_tp1_true, r_true, alpha=1.0):
+        '''One-step prediction loss (MSE for state + reward)
+        '''
+        s_pred, r_pred = self.predict_state_reward(s_t, a_t)
+
+        loss_state = F.mse_loss(s_pred, s_tp1_true)
+        loss_reward = F.mse_loss(r_pred, r_true)
+        total_loss = loss_state + alpha * loss_reward
+        return total_loss, loss_state.item(), loss_reward.item()
+
 # Initialize the AutoEncoder
 input_dim = 76      # State dim
 latent_dim = 2*12   # 2*K canonical states (q, p), K is DoF
 action_dim = 12     
 autoencoder = AutoEncoder(input_dim, latent_dim)
 
-# Encode state
-q, p, u = autoencoder.encode(s_t)
- 
 # Aliengo Offline Data
 data_load_path = 'mbrl_dynamics_net/dataset/PreprocessedDataset/train'
 data = OfflineDatasetLoader().get_dataset(data_load_path, preprocess=True)
 for key, value in data.items():
     print(f"{key}: {np.array(value).shape}")
 
+
+# Encode state
+# q, p, u = autoencoder.encode(s_t)
+ 
 # actions           (12,)
 # observations      (58,)
 # next_observations (58,)
@@ -108,24 +175,20 @@ for key, value in data.items():
 # - `a` is action of shape (batch_size, action_dim)
 # - `ode_func` is an instance of your HamiltonianODE or ODENetwork
 
-ode_func = HamiltonianODE(latent_dim, action_dim).to(u.device)
+# ode_func = HamiltonianODE(latent_dim, action_dim).to(u.device)
 
-# Concatenate u and a for input to ode_func
-u_a = torch.cat([u, a], dim=-1)
+# # Concatenate u and a for input to ode_func
+# u_a = torch.cat([u, a], dim=-1)
 
-# Choose time span
-t_span = torch.tensor([0, 1], dtype=torch.float32).to(u.device)  # From t=0 to t=1
+# # Choose time span
+# t_span = torch.tensor([0, 1], dtype=torch.float32).to(u.device)  # From t=0 to t=1
 
-# Integrate using odeint
-# Output shape: [2, batch_size, latent_dim] — one for t=0 and one for t=1
-u_a_traj = odeint(ode_func, u_a, t_span, method='rk4')  # Or use 'dopri5'
+# # Integrate using odeint
+# # Output shape: [2, batch_size, latent_dim] — one for t=0 and one for t=1
+# u_a_traj = odeint(ode_func, u_a, t_span, method='rk4')  # Or use 'dopri5'
 
-# Extract final state (t = 1)
-u_a_next = u_a_traj[-1]  # Shape: (batch_size, latent_dim + action_dim)
 
-# Separate latent state
-u_next = u_a_next[:, :u.shape[1]]  # Extract u (latent state) part (drop action)
 
-# Decode to predict next state
-s_t_plus1_pred = autoencoder.decode(u_next)
+# # Decode to predict next state
+# s_t_plus1_pred = autoencoder.decode(u_next)
 
