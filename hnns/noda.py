@@ -8,7 +8,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
 from mbrl_dynamics_net.utils.buffer import OfflineDatasetLoader
 
 class AutoEncoder(nn.Module):
-    def __init__(self, input_dim, latent_dim):  
+    def __init__(self, input_dim, latent_dim) -> None:  
         super(AutoEncoder, self).__init__()
         assert latent_dim % 2 == 0, "latent_dim must be even for q, p split"
 
@@ -46,7 +46,7 @@ class AutoEncoder(nn.Module):
         return self.decoder(u)
 
 class HamiltonianODE(nn.Module):
-    def __init__(self, latent_dim, action_dim):
+    def __init__(self, latent_dim, action_dim) -> None:
         super(HamiltonianODE, self).__init__()
         self.latent_dim = latent_dim
         assert latent_dim % 2 == 0, "latent_dim must be even"
@@ -89,7 +89,7 @@ class HamiltonianODE(nn.Module):
         return du_dt
 
 class RewardDecoder(nn.Module):
-    def __init__(self, latent_dim, action_dim):
+    def __init__(self, latent_dim, action_dim) -> None:
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(latent_dim + action_dim, 128),
@@ -102,14 +102,14 @@ class RewardDecoder(nn.Module):
         return self.net(torch.cat([u, a], dim=-1))  # shape: [B, 1]
 
 class NODA(nn.Module):
-    def __init__(self, input_dim, latent_dim, action_dim, device='gpu'):
+    def __init__(self, input_dim, latent_dim, action_dim, device='cpu') -> None::
         super().__init__()
         self.device = device
         self.autoencoder = AutoEncoder(input_dim, latent_dim).to(device)
         self.ode_func = HamiltonianODE(latent_dim, action_dim).to(device)
         self.reward_decoder = RewardDecoder(latent_dim, action_dim).to(device)
-        self.latent_dim = latent_dim
-        self.action_dim = action_dim
+        # self.latent_dim = latent_dim
+        # self.action_dim = action_dim
 
     def format_samples_for_training(self, data: Dict) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         obss = data["observations"]
@@ -122,8 +122,11 @@ class NODA(nn.Module):
         '''Predict next state and reward given current state and action.
         '''
         q, p, u = self.autoencoder.encode(s_t)
-        u_a = torch.cat([u, a_t], dim=-1)
 
+        # Predict reward r using q,p and action a
+        r_pred = self.reward_decoder(q, p, a_t)
+
+        u_a = torch.cat([u, a_t], dim=-1)
         t_span = torch.tensor(t_span, dtype=torch.float32).to(s_t.device)
         u_a_traj = odeint(self.ode_func, u_a, t_span, method='rk4')
 
@@ -136,7 +139,7 @@ class NODA(nn.Module):
         # u_next = u_a_traj[-1][:, :self.latent_dim] 
 
         s_t_plus1_pred = self.autoencoder.decode(u_next)
-        r_pred = self.reward_decoder(q, p, a_t)
+        
         return s_t_plus1_pred, r_pred
 
     def compute_loss(self, s_t, a_t, s_tp1_true, r_true, alpha=1.0):
@@ -144,10 +147,25 @@ class NODA(nn.Module):
         '''
         s_pred, r_pred = self.predict_state_reward(s_t, a_t)
 
+        # Canonical latent encoding
+        _, _, u = self.autoencoder.encode(s_t)
+        # Reconstruction from latent canonical encoding
+        s_recon = self.autoencoder.decode(u)
+
+        # Reconstruction loss
+        loss_recon = F.mse_loss(s_recon, s_t)          
+        # Next-state prediction loss
         loss_state = F.mse_loss(s_pred, s_tp1_true)
+        # Reward prediction loss
         loss_reward = F.mse_loss(r_pred, r_true)
-        total_loss = loss_state + alpha * loss_reward
-        return total_loss, loss_state.item(), loss_reward.item()
+
+        # Total loss function for NODA
+        # As a convex combination of the state loss and the reward loss
+        total_loss = alpha * (loss_recon + loss_state) + (1 - alpha) * loss_reward
+        return total_loss, loss_recon.item(), loss_state.item(), loss_reward.item()
+
+    def train(self) -> None:
+        inputs, targets = self.format_samples_for_training(data)
 
 # Initialize the AutoEncoder
 input_dim = 76      # State dim
