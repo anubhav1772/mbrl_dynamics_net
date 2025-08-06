@@ -1,10 +1,15 @@
+import numpy as np
 import torch
 import torch.nn as nn
+from torch.nn import functional as F
 from torchdiffeq import odeint
-
+from torch.utils.data import DataLoader, TensorDataset
+import sys
+import os
 # Add the parent folder of `mbrl_dynamics_net` to Python path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
+from typing import Dict, List, Union, Tuple, Optional, Callable
 from mbrl_dynamics_net.utils.buffer import OfflineDatasetLoader
 
 class AutoEncoder(nn.Module):
@@ -68,25 +73,30 @@ class HamiltonianODE(nn.Module):
 
     def forward(self, t, u_a):
         # u_a = concat([u, a]) where u = [q, p]
-        u, a = torch.split(u_a, [self.latent_dim, u_a.shape[-1] - self.latent_dim], dim=-1)
-        q, p = torch.chunk(u, 2, dim=-1)
+        u, a = torch.split(u_a, [self.latent_dim, u_a.shape[-1] - self.latent_dim], dim=-1)  # u: (64, 24), a: (64, 12)
+        q, p = torch.chunk(u, 2, dim=-1)  # q: (64, 12), p: (64, 12)
+
+        # Ensure q and p require gradients
         q.requires_grad_(True)
         p.requires_grad_(True)
 
-        # Compute Hamiltonian
-        H_in = torch.cat([q, p], dim=-1)
+        # Compute Hamiltonian input
+        H_in = torch.cat([q, p], dim=-1)  # H_in: (64, 24)
 
-        du_list = []
-        for i in range(q.shape[0]):
-            H_scalar = self.H(H_in[i:i+1]).squeeze()
-            grads = torch.autograd.grad(H_scalar, (q[i], p[i]), retain_graph=True, create_graph=True)
-            dq_dt_i = grads[1]
-            dp_dt_i = -grads[0] + self.force(a[i:i+1]).squeeze(0)
-            du_i = torch.cat([dq_dt_i, dp_dt_i], dim=-1)
-            du_list.append(du_i)
+        # Compute the Hamiltonian for the full batch
+        H_scalar = self.H(H_in).squeeze()  # H_scalar: (64,)
+        # Sum or average over the batch to make it a scalar (choose one)
+        H_scalar = H_scalar.mean()
+        # Compute gradients with respect to q and p
+        grads = torch.autograd.grad(H_scalar, (q, p), retain_graph=True, create_graph=True)
 
-        du_dt = torch.stack(du_list, dim=0)
-        return du_dt
+        # Extract gradients for each sample in the batch
+        dq_dt = grads[1]  # dq_dt: (64, 12)
+        dp_dt = -grads[0] + self.force(a)  # dp_dt: (64, 12)
+
+        # Combine dq_dt and dp_dt to form the derivative of the state (du_dt)
+        du_dt = torch.cat([dq_dt, dp_dt], dim=-1)  # du_dt: (64, 24)
+        return torch.cat([du_dt, a], dim=-1)       # (64, 36)
 
 class RewardDecoder(nn.Module):
     def __init__(self, latent_dim, action_dim) -> None:
@@ -102,7 +112,7 @@ class RewardDecoder(nn.Module):
         return self.net(torch.cat([u, a], dim=-1))  # shape: [B, 1]
 
 class NODA(nn.Module):
-    def __init__(self, input_dim, latent_dim, action_dim, device='cpu') -> None::
+    def __init__(self, input_dim, latent_dim, action_dim, device='cpu') -> None:
         super().__init__()
         self.device = device
         self.autoencoder = AutoEncoder(input_dim, latent_dim).to(device)
@@ -127,7 +137,7 @@ class NODA(nn.Module):
         r_pred = self.reward_decoder(q, p, a_t)
 
         u_a = torch.cat([u, a_t], dim=-1)
-        t_span = torch.tensor(t_span, dtype=torch.float32).to(s_t.device)
+        t_span = torch.tensor(t_span, dtype=torch.float32).to(self.device)
         u_a_traj = odeint(self.ode_func, u_a, t_span, method='rk4')
 
         # Extract final state (t = 1)
@@ -142,11 +152,10 @@ class NODA(nn.Module):
         
         return s_t_plus1_pred, r_pred
 
-    def compute_loss(self, s_t, a_t, s_tp1_true, r_true, alpha=1.0):
+    def compute_loss(self, s_t, a_t, s_tp1_true, r_true, alpha=0.5):
         '''One-step prediction loss (MSE for state + reward)
         '''
         s_pred, r_pred = self.predict_state_reward(s_t, a_t)
-
         # Canonical latent encoding
         _, _, u = self.autoencoder.encode(s_t)
         # Reconstruction from latent canonical encoding
@@ -162,16 +171,72 @@ class NODA(nn.Module):
         # Total loss function for NODA
         # As a convex combination of the state loss and the reward loss
         total_loss = alpha * (loss_recon + loss_state) + (1 - alpha) * loss_reward
+        total_loss = total_loss.clone().detach().requires_grad_(True)
         return total_loss, loss_recon.item(), loss_state.item(), loss_reward.item()
 
-    def train(self) -> None:
-        inputs, targets = self.format_samples_for_training(data)
+class NODATrainer:
+    def __init__(self, model, data, batch_size=64, lr=1e-4, device='cpu'):
+        self.model = model.to(device)
+        self.device = device
+        self.batch_size = batch_size
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
+        
+        # Prepare data for batching (convert numpy arrays to torch tensors)
+        obss, actions, next_obss, rewards = self.model.format_samples_for_training(data)
+        
+        # Create a DataLoader for batching
+        self.dataset =  TensorDataset(torch.tensor(obss, dtype=torch.float32),
+                                        torch.tensor(actions, dtype=torch.float32),
+                                        torch.tensor(next_obss, dtype=torch.float32),
+                                        torch.tensor(rewards, dtype=torch.float32))
+        self.dataloader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=True)
+
+    def train_one_epoch(self):
+        total_loss_ = 0
+        total_recon_loss = 0
+        total_state_loss = 0
+        total_reward_loss = 0
+
+        for batch in self.dataloader:
+            obss, actions, next_obss, rewards = batch
+
+            obss, actions, next_obss, rewards = obss.to(self.device), actions.to(self.device), next_obss.to(self.device), rewards.to(self.device)
+
+            # Zero the gradients
+            self.optimizer.zero_grad()
+
+            # Forward pass: compute the total loss (state + reward prediction loss)
+            total_loss, loss_recon, loss_state, loss_reward = self.model.compute_loss(obss, actions, next_obss, rewards)
+            
+            # Backpropagation and optimization
+            total_loss.backward()
+            self.optimizer.step()
+
+            total_loss_ += total_loss.item()
+            total_recon_loss += loss_recon
+            total_state_loss += loss_state
+            total_reward_loss += loss_reward
+        
+        mean_loss = total_loss_ / len(self.dataloader)
+        mean_recon_loss = total_recon_loss / len(self.dataloader)
+        mean_state_loss = total_state_loss / len(self.dataloader)
+        mean_reward_loss = total_reward_loss / len(self.dataloader)
+
+        return mean_loss, mean_recon_loss, mean_state_loss, mean_reward_loss
+
+    def train(self, num_epochs=1000):
+        for epoch in range(num_epochs):
+            mean_loss, mean_recon_loss, mean_state_loss, mean_reward_loss = self.train_one_epoch()
+
+            # Log training progress (could be to TensorBoard or standard print)
+            print(f"Epoch {epoch+1}/{num_epochs}, Loss: {mean_loss:.4f}, Recon Loss: {mean_recon_loss:.4f}, State Loss: {mean_state_loss:.4f}, Reward Loss: {mean_reward_loss:.4f}")
 
 # Initialize the AutoEncoder
-input_dim = 76      # State dim
+input_dim = 58      # State dim
 latent_dim = 2*12   # 2*K canonical states (q, p), K is DoF
 action_dim = 12     
-autoencoder = AutoEncoder(input_dim, latent_dim)
+device = "cuda" if torch.cuda.is_available() else "cpu"
+# autoencoder = AutoEncoder(input_dim, latent_dim)
 
 # Aliengo Offline Data
 data_load_path = 'mbrl_dynamics_net/dataset/PreprocessedDataset/train'
@@ -179,6 +244,9 @@ data = OfflineDatasetLoader().get_dataset(data_load_path, preprocess=True)
 for key, value in data.items():
     print(f"{key}: {np.array(value).shape}")
 
+model = NODA(input_dim, latent_dim, action_dim, device=device)
+trainer = NODATrainer(model, data, batch_size=64, lr=2e-4, device=device)
+trainer.train(num_epochs=10)
 
 # Encode state
 # q, p, u = autoencoder.encode(s_t)
@@ -204,8 +272,6 @@ for key, value in data.items():
 # # Integrate using odeint
 # # Output shape: [2, batch_size, latent_dim] — one for t=0 and one for t=1
 # u_a_traj = odeint(ode_func, u_a, t_span, method='rk4')  # Or use 'dopri5'
-
-
 
 # # Decode to predict next state
 # s_t_plus1_pred = autoencoder.decode(u_next)
