@@ -66,13 +66,14 @@ class HamiltonianODE(nn.Module):
 
         # External force model Q(a)
         self.force = nn.Sequential(
-            nn.Linear(action_dim, self.K),
-            nn.Tanh(),
-            nn.Linear(self.K, self.K)
+            nn.Linear(action_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, self.K)  # K = DoF
         )
 
     def forward(self, t, u_a):
-        # u_a = concat([u, a]) where u = [q, p]
         u, a = torch.split(u_a, [self.latent_dim, u_a.shape[-1] - self.latent_dim], dim=-1)  # u: (64, 24), a: (64, 12)
         q, p = torch.chunk(u, 2, dim=-1)  # q: (64, 12), p: (64, 12)
 
@@ -84,11 +85,20 @@ class HamiltonianODE(nn.Module):
         H_in = torch.cat([q, p], dim=-1)  # H_in: (64, 24)
 
         # Compute the Hamiltonian for the full batch
-        H_scalar = self.H(H_in).squeeze()  # H_scalar: (64,)
+        # H_scalar = self.H(H_in).squeeze()  # H_scalar: (64,)
         # Sum or average over the batch to make it a scalar (choose one)
-        H_scalar = H_scalar.mean()
+        # H_scalar = H_scalar.mean()
         # Compute gradients with respect to q and p
-        grads = torch.autograd.grad(H_scalar, (q, p), retain_graph=True, create_graph=True)
+        # grads = torch.autograd.grad(H_scalar, (q, p), retain_graph=True, create_graph=True)
+
+        H_scalar = self.H(H_in)  # shape: (batch, 1)
+        grads = torch.autograd.grad(
+            outputs=H_scalar,
+            inputs=(q, p),
+            grad_outputs=torch.ones_like(H_scalar),
+            retain_graph=True,
+            create_graph=True
+        )
 
         # Extract gradients for each sample in the batch
         dq_dt = grads[1]  # dq_dt: (64, 12)
@@ -96,7 +106,8 @@ class HamiltonianODE(nn.Module):
 
         # Combine dq_dt and dp_dt to form the derivative of the state (du_dt)
         du_dt = torch.cat([dq_dt, dp_dt], dim=-1)  # du_dt: (64, 24)
-        return torch.cat([du_dt, a], dim=-1)       # (64, 36)
+        da_dt = torch.zeros_like(a)                # Action is NOT integrated; its derivative is 0
+        return torch.cat([du_dt, da_dt], dim=-1)       # (64, 36)
 
 class RewardDecoder(nn.Module):
     def __init__(self, latent_dim, action_dim) -> None:
@@ -138,13 +149,13 @@ class NODA(nn.Module):
 
         u_a = torch.cat([u, a_t], dim=-1)
         t_span = torch.tensor(t_span, dtype=torch.float32).to(self.device)
-        u_a_traj = odeint(self.ode_func, u_a, t_span, method='rk4')
+        u_a_traj = odeint(self.ode_func, u_a, t_span, method='rk4') # Shape: (num_timesteps, batch_size, latent_dim + action_dim)
 
         # Extract final state (t = 1)
-        u_a_next = u_a_traj[-1]             # Shape: (batch_size, latent_dim + action_dim)
+        u_a_next = u_a_traj[-1]                                     # Shape: (batch_size, latent_dim + action_dim)
 
         # Separate latent state
-        u_next = u_a_next[:, :u.shape[1]]  # Extract u (latent state) part (drop action) 
+        u_next = u_a_next[:, :u.shape[1]]                           # Extract u (latent state) part (drop action) 
 
         # u_next = u_a_traj[-1][:, :self.latent_dim] 
 
@@ -171,7 +182,7 @@ class NODA(nn.Module):
         # Total loss function for NODA
         # As a convex combination of the state loss and the reward loss
         total_loss = alpha * (loss_recon + loss_state) + (1 - alpha) * loss_reward
-        total_loss = total_loss.clone().detach().requires_grad_(True)
+        # total_loss = total_loss.clone().detach().requires_grad_(True)
         return total_loss, loss_recon.item(), loss_state.item(), loss_reward.item()
 
 class NODATrainer:
@@ -196,6 +207,9 @@ class NODATrainer:
         total_recon_loss = 0
         total_state_loss = 0
         total_reward_loss = 0
+
+        # for name, param in self.model.named_parameters():
+        #     print(name, param.data.mean().item(), param.grad is not None)
 
         for batch in self.dataloader:
             obss, actions, next_obss, rewards = batch
@@ -226,10 +240,10 @@ class NODATrainer:
 
     def train(self, num_epochs=1000):
         for epoch in range(num_epochs):
-            mean_loss, mean_recon_loss, mean_state_loss, mean_reward_loss = self.train_one_epoch()
+            mean_total_loss, mean_recon_loss, mean_state_loss, mean_reward_loss = self.train_one_epoch()
 
             # Log training progress (could be to TensorBoard or standard print)
-            print(f"Epoch {epoch+1}/{num_epochs}, Loss: {mean_loss:.4f}, Recon Loss: {mean_recon_loss:.4f}, State Loss: {mean_state_loss:.4f}, Reward Loss: {mean_reward_loss:.4f}")
+            print(f"Epoch {epoch+1}/{num_epochs}, Total Loss: {mean_total_loss:.4f}, Recon Loss: {mean_recon_loss:.4f}, State Loss: {mean_state_loss:.4f}, Reward Loss: {mean_reward_loss:.4f}")
 
 # Initialize the AutoEncoder
 input_dim = 58      # State dim
