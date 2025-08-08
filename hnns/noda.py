@@ -107,13 +107,16 @@ class HamiltonianODE(nn.Module):
         )
 
         # Extract gradients for each sample in the batch
-        dq_dt = grads[1]  # dq_dt: (64, 12)
-        dp_dt = -grads[0] + self.force(a)  # dp_dt: (64, 12)
+        dq_dt = grads[1]                            # Shape: (64, 12)
+        dp_dt = -grads[0] + self.force(a)           # Shape: (64, 12)
 
         # Combine dq_dt and dp_dt to form the derivative of the state (du_dt)
-        du_dt = torch.cat([dq_dt, dp_dt], dim=-1)  # du_dt: (64, 24)
-        da_dt = torch.zeros_like(a)                # Action is NOT integrated; its derivative is 0
-        return torch.cat([du_dt, da_dt], dim=-1)       # (64, 36)
+        du_dt = torch.cat([dq_dt, dp_dt], dim=-1)   # Shape: (64, 24)
+
+        # With da_dt = 0, actions remain constant over the integration window
+        # Action is not integrated; its derivative is 0
+        da_dt = torch.zeros_like(a)               
+        return torch.cat([du_dt, da_dt], dim=-1)    # Shape: (64, 36)
 
 class RewardDecoder(nn.Module):
     def __init__(self, latent_dim, action_dim) -> None:
@@ -155,14 +158,20 @@ class NODA(nn.Module):
 
         u_a = torch.cat([u, a_t], dim=-1)
         # t_span = torch.tensor([0, dt], dtype=torch.float32).to(self.device)
-        # u_a_traj = odeint(self.ode_func, u_a, t_span, method='rk4', options={'step_size': dt}) # Shape: (num_timesteps, batch_size, latent_dim + action_dim)
+
+        # Shape: (num_timesteps, batch_size, latent_dim + action_dim)
+        # u_a_traj = odeint(self.ode_func, # returns [du_dt, da_dt] with da_dt=0
+        #                     u_a, 
+        #                     t_span,      # [0, dt] => [0, 0.02]
+        #                     method='rk4', 
+        #                     options={'step_size': dt}) 
         
         u_a_traj = odeint(self.ode_func, u_a, t_span, method='dopri5', rtol=1e-5, atol=1e-7)
         # Extract final state (t = 1)
         u_a_next = u_a_traj[-1]                                     # Shape: (batch_size, latent_dim + action_dim)
 
-        # Separate latent state
-        u_next = u_a_next[:, :u.shape[1]]                           # Extract u (latent state) part (drop action) 
+        # Extract u (latent state) part (drop action) 
+        u_next = u_a_next[:, :u.shape[1]]                           # Shape: (batch_size, latent_dim)
 
         # u_next = u_a_traj[-1][:, :self.latent_dim] 
 
