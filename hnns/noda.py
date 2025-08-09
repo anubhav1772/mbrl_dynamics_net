@@ -79,25 +79,60 @@ class HamiltonianODE(nn.Module):
             nn.Linear(64, self.K)  # K = DoF
         )
 
-    def forward(self, t, u_a):
-        u, a = torch.split(u_a, [self.latent_dim, u_a.shape[-1] - self.latent_dim], dim=-1)  # u: (64, 24), a: (64, 12)
-        q, p = torch.chunk(u, 2, dim=-1)  # q: (64, 12), p: (64, 12)
+    # def forward(self, t, u_a):
+    #     '''Method 1: State Augmentation Approach.
+    #     '''
+    #     u, a = torch.split(u_a, [self.latent_dim, u_a.shape[-1] - self.latent_dim], dim=-1)  # u: (64, 24), a: (64, 12)
+    #     q, p = torch.chunk(u, 2, dim=-1)  # q: (64, 12), p: (64, 12)
 
+    #     # Ensure q and p require gradients
+    #     q.requires_grad_(True)
+    #     p.requires_grad_(True)
+
+    #     # Compute Hamiltonian input
+    #     H_in = torch.cat([q, p], dim=-1)  # H_in: (64, 24)
+
+    #     # Compute the Hamiltonian for the full batch
+    #     # H_scalar = self.H(H_in).squeeze()  # H_scalar: (64,)
+    #     # Sum or average over the batch to make it a scalar (choose one)
+    #     # H_scalar = H_scalar.mean()
+    #     # Compute gradients with respect to q and p
+    #     # grads = torch.autograd.grad(H_scalar, (q, p), retain_graph=True, create_graph=True)
+
+    #     H_scalar = self.H(H_in)  # shape: (batch, 1)
+    #     grads = torch.autograd.grad(
+    #         outputs=H_scalar,
+    #         inputs=(q, p),
+    #         grad_outputs=torch.ones_like(H_scalar),
+    #         retain_graph=True,
+    #         create_graph=True
+    #     )
+
+    #     # Extract gradients for each sample in the batch
+    #     dq_dt = grads[1]                            # Shape: (64, 12)
+    #     dp_dt = -grads[0] + self.force(a)           # Shape: (64, 12)
+
+    #     # Combine dq_dt and dp_dt to form the derivative of the state (du_dt)
+    #     du_dt = torch.cat([dq_dt, dp_dt], dim=-1)   # Shape: (64, 24)
+
+    #     # With da_dt = 0, actions remain constant over the integration window
+    #     # Action is not integrated; its derivative is 0
+    #     da_dt = torch.zeros_like(a)               
+    #     return torch.cat([du_dt, da_dt], dim=-1)    # Shape: (64, 36)
+
+    def forward(self, t, u, a):
+        '''Method 2: Lambda Approach.
+        '''
+        q, p = torch.chunk(u, 2, dim=-1)
+        
         # Ensure q and p require gradients
         q.requires_grad_(True)
         p.requires_grad_(True)
 
         # Compute Hamiltonian input
         H_in = torch.cat([q, p], dim=-1)  # H_in: (64, 24)
-
-        # Compute the Hamiltonian for the full batch
-        # H_scalar = self.H(H_in).squeeze()  # H_scalar: (64,)
-        # Sum or average over the batch to make it a scalar (choose one)
-        # H_scalar = H_scalar.mean()
-        # Compute gradients with respect to q and p
-        # grads = torch.autograd.grad(H_scalar, (q, p), retain_graph=True, create_graph=True)
-
-        H_scalar = self.H(H_in)  # shape: (batch, 1)
+        
+        H_scalar = self.H(H_in)  
         grads = torch.autograd.grad(
             outputs=H_scalar,
             inputs=(q, p),
@@ -110,13 +145,8 @@ class HamiltonianODE(nn.Module):
         dq_dt = grads[1]                            # Shape: (64, 12)
         dp_dt = -grads[0] + self.force(a)           # Shape: (64, 12)
 
-        # Combine dq_dt and dp_dt to form the derivative of the state (du_dt)
-        du_dt = torch.cat([dq_dt, dp_dt], dim=-1)   # Shape: (64, 24)
-
-        # With da_dt = 0, actions remain constant over the integration window
-        # Action is not integrated; its derivative is 0
-        da_dt = torch.zeros_like(a)               
-        return torch.cat([du_dt, da_dt], dim=-1)    # Shape: (64, 36)
+        du_dt = torch.cat([dq_dt, dp_dt], dim=-1)   # Shape: (64, 24)      
+        return du_dt
 
 class RewardDecoder(nn.Module):
     def __init__(self, latent_dim, action_dim) -> None:
@@ -148,35 +178,71 @@ class NODA(nn.Module):
         rewards = data["rewards"].reshape(-1, 1)
         return obss, actions, next_obss, rewards
 
+    # def predict_state_reward(self, s_t, a_t, dt):
+    #     '''Method 1: State Augmentation Approach.
+    #     Augmenting the state u with a (i.e., u_a) and setting da_dt = 0.
+    #     Predict next state and reward given current state and action.
+    #     '''
+    #     q, p, u = self.autoencoder.encode(s_t)
+
+    #     # Predict reward r using q,p and action a
+    #     r_pred = self.reward_decoder(q, p, a_t)
+
+    #     u_a = torch.cat([u, a_t], dim=-1)
+
+    #     # Integrate canonical state forward one time step
+    #     # t_span = torch.tensor([0, dt], dtype=torch.float32).to(self.device)
+
+    #     # Shape: (num_timesteps, batch_size, latent_dim + action_dim)
+    #     # u_a_traj = odeint(self.ode_func, # returns [du_dt, da_dt] with da_dt=0
+    #     #                     u_a, 
+    #     #                     t_span,      # [0, dt] => [0, 0.02]
+    #     #                     method='rk4', 
+    #     #                     options={'step_size': dt}) 
+        
+    #     u_a_traj = odeint(self.ode_func, u_a, t_span, method='dopri5', rtol=1e-5, atol=1e-7)
+    #     # Extract final state (t = 1)
+    #     u_a_next = u_a_traj[-1]                                     # Shape: (batch_size, latent_dim + action_dim)
+
+    #     # Extract u (latent state) part (drop action) 
+    #     u_next = u_a_next[:, :u.shape[1]]                           # Shape: (batch_size, latent_dim)
+
+    #     # u_next = u_a_traj[-1][:, :self.latent_dim] 
+
+    #     s_t_plus1_pred = self.autoencoder.decode(u_next)
+        
+    #     return s_t_plus1_pred, r_pred
+
     def predict_state_reward(self, s_t, a_t, dt):
-        '''Predict next state and reward given current state and action.
+        '''Method 2: Lambda Approach.
+        Predict next state and reward given current state and action.
+        a_t stays constant during the short integration window (matching dt).
+        The ODE integrates only the canonical state u=(q,p), not actions.
+        The ODE solver doesn’t know about actions, so we wrap our ODE function in a lambda that:
+            - Takes the t and u_ from the solver, 
+            - passes them to the original self.ode_func,
+            - Also passes the fixed a_t from the current batch.
         '''
+
+        # Encode observation to canonical (q, p) and full latent u
         q, p, u = self.autoencoder.encode(s_t)
 
-        # Predict reward r using q,p and action a
+        # Predict reward from q, p, and a_t
         r_pred = self.reward_decoder(q, p, a_t)
 
-        u_a = torch.cat([u, a_t], dim=-1)
-        # t_span = torch.tensor([0, dt], dtype=torch.float32).to(self.device)
+        # Integrate canonical state forward one time step
+        t_span = torch.tensor([0, dt], dtype=torch.float32, device=self.device)
+        u_traj = odeint(lambda t, u_: self.ode_func(t, u_, a_t),
+                        u,
+                        t_span,
+                        method='rk4',
+                        options={'step_size': dt})
 
-        # Shape: (num_timesteps, batch_size, latent_dim + action_dim)
-        # u_a_traj = odeint(self.ode_func, # returns [du_dt, da_dt] with da_dt=0
-        #                     u_a, 
-        #                     t_span,      # [0, dt] => [0, 0.02]
-        #                     method='rk4', 
-        #                     options={'step_size': dt}) 
-        
-        u_a_traj = odeint(self.ode_func, u_a, t_span, method='dopri5', rtol=1e-5, atol=1e-7)
-        # Extract final state (t = 1)
-        u_a_next = u_a_traj[-1]                                     # Shape: (batch_size, latent_dim + action_dim)
+        # next canonical state
+        u_next = u_traj[1]
 
-        # Extract u (latent state) part (drop action) 
-        u_next = u_a_next[:, :u.shape[1]]                           # Shape: (batch_size, latent_dim)
-
-        # u_next = u_a_traj[-1][:, :self.latent_dim] 
-
+        # Decode back to predicted next observation
         s_t_plus1_pred = self.autoencoder.decode(u_next)
-        
         return s_t_plus1_pred, r_pred
 
     def compute_loss(self, s_t, a_t, s_tp1_true, r_true, dt, alpha):
@@ -201,7 +267,7 @@ class NODA(nn.Module):
         return total_loss, loss_recon, loss_state, loss_reward
 
 class NODATrainer:
-    def __init__(self, model, data, batch_size=64, lr=1e-4, dt, alpha, device='cpu'):
+    def __init__(self, model, data, batch_size, lr, dt, alpha, device='cpu'):
         self.model = model.to(device)
         self.device = device
         self.batch_size = batch_size
@@ -280,8 +346,8 @@ def train_dynamics_model():
     parser.add_argument("--dt", type=float, default=0.02)         # from control_dt (0.02 => 50 Hz)
     parser.add_argument("--alpha", type=float, default=0.5)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("data_load_path", type=str, default="mbrl_dynamics_net/dataset/PreprocessedDataset/train")
-    parser.add_argument("preprocess", type=bool, default=True)
+    parser.add_argument("--data_load_path", type=str, default="mbrl_dynamics_net/dataset/PreprocessedDataset/train")
+    parser.add_argument("--preprocess", type=bool, default=True)
     parser.add_argument('--run-name', type=str, default=datetime.now().strftime("run_%Y%m%d-%H%M%S"), help='used for logging to distingush different runs')
 
     args = parser.parse_args()
