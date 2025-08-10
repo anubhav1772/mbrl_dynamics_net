@@ -12,7 +12,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
 
 from typing import Dict, List, Union, Tuple, Optional, Callable
 from mbrl_dynamics_net.utils.buffer import OfflineDatasetLoader
-
+from mbrl_dynamics_net.utils.logger import make_log_dirs
 from torch.utils.tensorboard import SummaryWriter
 
 from datetime import datetime
@@ -321,11 +321,17 @@ class NODATrainer:
 
         return mean_loss, mean_recon_loss, mean_state_loss, mean_reward_loss
 
-    def train(self, num_epochs=1000):
+    def train(self, num_epochs=1000, wandb = None, tensorboard_writer = None):
         for epoch in range(num_epochs):
             mean_total_loss, mean_recon_loss, mean_state_loss, mean_reward_loss = self.train_one_epoch()
 
-            # Log training progress (could be to TensorBoard or standard print)
+            # Log training progress
+            if wandb is not None:
+                wandb.log({'timestep': epoch,
+                    'loss/dynamics_train_loss': mean_total_loss,
+                })
+            else:
+                tensorboard_writer.add_scalar("loss/dynamics_train_loss", mean_total_loss, epoch)
             print(f"Epoch {epoch+1}/{num_epochs}, Total Loss: {mean_total_loss:.4f}, Recon Loss: {mean_recon_loss:.4f}, State Loss: {mean_state_loss:.4f}, Reward Loss: {mean_reward_loss:.4f}")
 
 def train_dynamics_model():
@@ -348,9 +354,29 @@ def train_dynamics_model():
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--data_load_path", type=str, default="mbrl_dynamics_net/dataset/PreprocessedDataset/train")
     parser.add_argument("--preprocess", type=bool, default=True)
-    parser.add_argument('--run-name', type=str, default=datetime.now().strftime("run_%Y%m%d-%H%M%S"), help='used for logging to distingush different runs')
+    parser.add_argument('--run_name', type=str, default=f"NODA_{datetime.now().strftime('%Y%m%d_%H%M%S')}", help='used for logging to distingush different runs')
 
     args = parser.parse_args()
+
+    config = {
+        "dynamic_module": {
+            "input_dim": args.input_dim,
+            "action_dim": args.action_dim,
+            "latent_dim": args.latent_dim,
+            "batch_size": args.batch_size,
+            "lr": args.lr,
+            "dt": args.dt,
+            "alpha": args.alpha,
+            "class": "NODA",
+            },
+        "meta": {
+            "device": args.device,
+            "seed": args.seed,
+            "data_load_path": args.data_load_path,
+            "preprocess": args.preprocess,
+            "run_name": args.run_name,
+            }
+        }
 
     # Seed
     random.seed(args.seed)
@@ -368,6 +394,28 @@ def train_dynamics_model():
     for key, value in data.items():
         print(f"{key}: {np.array(value).shape}")
 
+    use_wandb = True
+    try:
+        # Attempt to initialize wandb and start tracking
+        wandb.init(
+            project="anubhav1772-itmo-university",
+            name=args.run_name,
+            config = config,
+            resume="never", # fresh run
+        )
+        print("W&B initialized successfully")
+    except wandb.errors.errors.CommError as e:
+        # In case of an error with wandb, catch the exception and use TensorBoard instead
+        print(f"W&B error occurred: {e}. \nUsing TensorBoard for logging instead.")
+        use_wandb = False
+
+        # Generate dynamic log directory using timestamp
+        # tensorboard_log_dir = os.path.join("runs", f"DYN_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        # Logger
+        log_dirs = make_log_dirs(args.task, 'test/dynamics', args.seed, vars(args), run_name=args.run_name)
+        print(f"log_dirs = {log_dirs}")
+        tensorboard_writer = SummaryWriter(log_dir=log_dirs)
+
     model = NODA(args.input_dim, args.latent_dim, args.action_dim, device=args.device)
     noda_trainer = NODATrainer(model, data, 
                           batch_size=args.batch_size, 
@@ -375,7 +423,12 @@ def train_dynamics_model():
                           dt=args.dt, 
                           alpha=args.alpha, 
                           device=args.device)
-    noda_trainer.train(num_epochs=args.num_epochs)
+
+    if use_wandb:
+        noda_trainer.train(num_epochs=args.num_epochs, wandb=wandb)
+    else:
+        noda_trainer.train(num_epochs=args.num_epochs, tensorboard_writer=tensorboard_writer)
+        tensorboard_writer.close()
 
     # Encode state
     # q, p, u = autoencoder.encode(s_t)
