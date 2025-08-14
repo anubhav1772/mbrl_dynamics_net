@@ -130,6 +130,19 @@ class HamiltonianSDE(SDEStratonovich):
         return self.diffusion(torch.cat([u, a], dim=-1))
 
 class ActionSDE(SDEStratonovich):
+    """Wrapper for an SDE model that injects a fixed action vector into both the drift (f) 
+    and diffusion (g) functions during integration.
+
+    This is useful when integrating stochastic dynamics models (in our case, HamiltonianSDE) 
+    where the action is constant over the integration window (matching dt), such as in 
+    short-horizon model prediction or single-step rollout.
+
+    Attributes:
+        sde_type (str): Inherited from base_sde; specifies the SDE interpretation ('ito' or 'stratonovich').
+                        Required by torchsde solvers to choose the correct numerical integration scheme.
+        base_sde (SDEStratonovich): The underlying SDE model defining f(t, u, a) and g(t, u, a).
+        a_t (Tensor): The fixed action to be passed into the base SDE's drift and diffusion during integration.
+    """
     def __init__(self, base_sde, a_t):
         super().__init__(noise_type=base_sde.noise_type)
         self.sde_type = base_sde.sde_type
@@ -173,15 +186,14 @@ class NODA(nn.Module):
         return obss, actions, next_obss, rewards
 
     def predict_state_reward(self, s_t, a_t, dt):
-        '''Method 2: Lambda Approach.
-        Predict next state and reward given current state and action.
+        """Predict next state and reward stochastically.
         a_t stays constant during the short integration window (matching dt).
-        The ODE integrates only the canonical state u=(q,p), not actions.
-        The ODE solver doesn’t know about actions, so we wrap our ODE function in a lambda that:
-            - Takes the t and u_ from the solver, 
-            - passes them to the original self.ode_func,
-            - Also passes the fixed a_t from the current batch.
-        '''
+
+        Args:
+            s_t          : Current state [batch, state_dim]
+            a_t          : Current action [batch, action_dim]
+            dt           : Integration step size
+        """
 
         # Encode observation to canonical (q, p) and full latent u
         q, p, u = self.autoencoder.encode(s_t)
