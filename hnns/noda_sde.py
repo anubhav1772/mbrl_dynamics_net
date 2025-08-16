@@ -10,7 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import random_split, DataLoader, TensorDataset
 import sys
 import os
 # Add the parent folder of `mbrl_dynamics_net` to Python path
@@ -228,23 +228,60 @@ class NODA(nn.Module):
         s_t_plus1_pred = self.autoencoder.decode(u_next)
         return s_t_plus1_pred, r_pred
 
-    def compute_loss(self, s_t, a_t, s_tp1_true, r_true, dt, alpha):
-        '''One-step prediction loss (MSE for state + reward)
-        '''
-        s_pred, r_pred = self.predict_state_reward(s_t, a_t, dt)
+    # def compute_loss(self, s_t, a_t, s_tp1_true, r_true, dt, alpha):
+    #     '''One-step prediction loss (MSE for state + reward)
+    #     '''
+    #     s_pred, r_pred = self.predict_state_reward(s_t, a_t, dt)
+    #     # Canonical latent encoding
+    #     _, _, u = self.autoencoder.encode(s_t)
+    #     # Reconstruction from latent canonical encoding
+    #     s_recon = self.autoencoder.decode(u)
+
+    #     # Reconstruction loss
+    #     loss_recon = F.mse_loss(s_recon, s_t)          
+    #     # Next-state prediction loss
+    #     loss_state = F.mse_loss(s_pred, s_tp1_true)
+    #     # Reward prediction loss
+    #     loss_reward = F.mse_loss(r_pred, r_true)
+
+    #     # Combined training loss
+    #     # As a convex combination of the state loss and the reward loss
+    #     total_loss = alpha * (loss_recon + loss_state) + (1 - alpha) * loss_reward
+    #     return total_loss, loss_recon, loss_state, loss_reward
+
+    def compute_loss(self, s_t, a_t, s_tp1_true, r_true, dt, alpha, num_rollouts=5):
+        """Compute the training loss for the stochastic Hamiltonian SDE dynamics model.
+
+        This method evaluates how well the model predicts the next state and reward
+        given the current state and action, while accounting for the stochasticity
+        in the dynamics. To reduce the variance introduced by random Brownian noise,
+        it performs multiple stochastic rollouts and averages the predictions.
+        """
+        rollout_preds = []
+        reward_preds = []
+
+        # Multi-rollout averaging
+        for _ in range(num_rollouts):
+            s_pred, r_pred = self.predict_state_reward(s_t, a_t, dt)
+            rollout_preds.append(s_pred)
+            reward_preds.append(r_pred)
+
+        s_pred_mean = torch.stack(rollout_preds, dim=0).mean(dim=0)
+        r_pred_mean = torch.stack(reward_preds, dim=0).mean(dim=0)
+
         # Canonical latent encoding
         _, _, u = self.autoencoder.encode(s_t)
         # Reconstruction from latent canonical encoding
         s_recon = self.autoencoder.decode(u)
 
-        # Reconstruction loss
-        loss_recon = F.mse_loss(s_recon, s_t)          
+        # State reconstruction loss (from autoencoder)
+        loss_recon = F.mse_loss(s_recon, s_t)
         # Next-state prediction loss
-        loss_state = F.mse_loss(s_pred, s_tp1_true)
+        loss_state = F.mse_loss(s_pred_mean, s_tp1_true)
         # Reward prediction loss
-        loss_reward = F.mse_loss(r_pred, r_true)
+        loss_reward = F.mse_loss(r_pred_mean, r_true)
 
-        # Total loss function for NODA
+        # Combined training loss
         # As a convex combination of the state loss and the reward loss
         total_loss = alpha * (loss_recon + loss_state) + (1 - alpha) * loss_reward
         return total_loss, loss_recon, loss_state, loss_reward
