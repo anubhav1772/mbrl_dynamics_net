@@ -287,7 +287,7 @@ class NODA(nn.Module):
         return total_loss, loss_recon, loss_state, loss_reward
 
 class NODATrainer:
-    def __init__(self, model, data, batch_size, lr, dt, alpha, device='cpu'):
+    def __init__(self, model, data, batch_size, lr, dt, alpha, holdout_ratio=0.15, device='cpu'):
         self.model = model.to(device)
         self.device = device
         self.batch_size = batch_size
@@ -303,56 +303,129 @@ class NODATrainer:
                                         torch.tensor(actions, dtype=torch.float32),
                                         torch.tensor(next_obss, dtype=torch.float32),
                                         torch.tensor(rewards, dtype=torch.float32))
-        self.dataloader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=True)
+
+        data_size = obss.shape[0]
+        holdout_size = min(int(data_size * holdout_ratio), 1000)
+        train_size = data_size - holdout_size
+        train_dataset, holdout_dataset = random_split(self.dataset, [train_size, holdout_size])       
+
+        self.train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
+        self.holdout_loader = DataLoader(holdout_dataset, batch_size=64, shuffle=False)
 
     def train_one_epoch(self):
-        total_loss_ = 0
-        total_recon_loss = 0
-        total_state_loss = 0
-        total_reward_loss = 0
+        self.model.train()
+        total_loss, total_recon_loss, total_state_loss, total_reward_loss = 0, 0, 0, 0
 
         # for name, param in self.model.named_parameters():
         #     print(name, param.data.mean().item(), param.grad is not None)
 
-        for batch in self.dataloader:
-            obss, actions, next_obss, rewards = batch
-
-            obss, actions, next_obss, rewards = obss.to(self.device), actions.to(self.device), next_obss.to(self.device), rewards.to(self.device)
+        for batch in self.train_loader:
+            obss, actions, next_obss, rewards = [x.to(self.device) for x in batch]
 
             # Zero the gradients
             self.optimizer.zero_grad()
 
             # Forward pass: compute the total loss (state + reward prediction loss)
-            total_loss, loss_recon, loss_state, loss_reward = self.model.compute_loss(obss, actions, next_obss, rewards, self.dt, self.alpha)
+            loss, loss_recon, loss_state, loss_reward = self.model.compute_loss(
+                obss, actions, next_obss, rewards, self.dt, self.alpha
+            )
             
             # Backpropagation and optimization
-            total_loss.backward()
+            loss.backward()
             self.optimizer.step()
 
-            total_loss_ += total_loss.item()
+            total_loss += loss.item()
             total_recon_loss += loss_recon.item()
             total_state_loss += loss_state.item()
             total_reward_loss += loss_reward.item()
         
-        mean_loss = total_loss_ / len(self.dataloader)
-        mean_recon_loss = total_recon_loss / len(self.dataloader)
-        mean_state_loss = total_state_loss / len(self.dataloader)
-        mean_reward_loss = total_reward_loss / len(self.dataloader)
+        mean_loss = total_loss / len(self.train_loader)
+        mean_recon_loss = total_recon_loss / len(self.train_loader)
+        mean_state_loss = total_state_loss / len(self.train_loader)
+        mean_reward_loss = total_reward_loss / len(self.train_loader)
 
         return mean_loss, mean_recon_loss, mean_state_loss, mean_reward_loss
 
+    # def train_one_epoch(self):
+    #     total_loss = 0
+    #     total_recon_loss = 0
+    #     total_state_loss = 0
+    #     total_reward_loss = 0
+
+    #     # for name, param in self.model.named_parameters():
+    #     #     print(name, param.data.mean().item(), param.grad is not None)
+
+    #     for batch in self.train_loader:
+    #         obss, actions, next_obss, rewards = batch
+
+    #         obss, actions, next_obss, rewards = obss.to(self.device), actions.to(self.device), next_obss.to(self.device), rewards.to(self.device)
+
+    #         # Zero the gradients
+    #         self.optimizer.zero_grad()
+
+    #         # Forward pass: compute the total loss (state + reward prediction loss)
+    #         loss, loss_recon, loss_state, loss_reward = self.model.compute_loss(obss, actions, next_obss, rewards, self.dt, self.alpha)
+            
+    #         # Backpropagation and optimization
+    #         loss.backward()
+    #         self.optimizer.step()
+
+    #         total_loss += loss.item()
+    #         total_recon_loss += loss_recon.item()
+    #         total_state_loss += loss_state.item()
+    #         total_reward_loss += loss_reward.item()
+        
+    #     mean_loss = total_loss / len(self.dataloader)
+    #     mean_recon_loss = total_recon_loss / len(self.dataloader)
+    #     mean_state_loss = total_state_loss / len(self.dataloader)
+    #     mean_reward_loss = total_reward_loss / len(self.dataloader)
+
+    #     return mean_loss, mean_recon_loss, mean_state_loss, mean_reward_loss
+
+    def evaluate_holdout(self):
+        """Evaluate model on holdout/validation set (no gradient updates)."""
+        self.model.eval()
+        total_loss, total_recon, total_state, total_reward = 0, 0, 0, 0
+
+        with torch.no_grad():
+            for batch in self.holdout_loader:
+                obss, actions, next_obss, rewards = [x.to(self.device) for x in batch]
+
+                loss, loss_recon, loss_state, loss_reward = self.model.compute_loss(
+                    obss, actions, next_obss, rewards, self.dt, self.alpha
+                )
+
+                total_loss += loss.item()
+                total_recon += loss_recon.item()
+                total_state += loss_state.item()
+                total_reward += loss_reward.item()
+
+        mean_loss = total_loss / len(self.holdout_loader)
+        mean_recon = total_recon / len(self.holdout_loader)
+        mean_state = total_state / len(self.holdout_loader)
+        mean_reward = total_reward / len(self.holdout_loader)
+
+        return mean_loss, mean_recon, mean_state, mean_reward
+
     def train(self, num_epochs=1000, wandb = None, tensorboard_writer = None):
         for epoch in range(num_epochs):
-            mean_total_loss, mean_recon_loss, mean_state_loss, mean_reward_loss = self.train_one_epoch()
+            train_loss, train_recon, train_state, train_reward = self.train_one_epoch()
+            val_loss, val_recon, val_state, val_reward = self.evaluate_holdout()
 
-            # Log training progress
+            # Logging
             if wandb is not None:
-                wandb.log({'timestep': epoch,
-                    'loss/dynamics_train_loss': mean_total_loss,
+                wandb.log({
+                    "epoch": epoch,
+                    "loss/train_total": train_loss,
+                    "loss/val_total": val_loss,
                 })
             else:
-                tensorboard_writer.add_scalar("loss/dynamics_train_loss", mean_total_loss, epoch)
-            print(f"Epoch {epoch+1}/{num_epochs}, Total Loss: {mean_total_loss:.4f}, Recon Loss: {mean_recon_loss:.4f}, State Loss: {mean_state_loss:.4f}, Reward Loss: {mean_reward_loss:.4f}")
+                tensorboard_writer.add_scalar("loss/train_total", train_loss, epoch)
+                tensorboard_writer.add_scalar("loss/val_total", val_loss, epoch)
+
+            print(f"Epoch {epoch+1}/{num_epochs} | "
+                  f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+            # print(f"Epoch {epoch+1}/{num_epochs}, Total Loss: {mean_total_loss:.4f}, Recon Loss: {mean_recon_loss:.4f}, State Loss: {mean_state_loss:.4f}, Reward Loss: {mean_reward_loss:.4f}")
 
 def train_dynamics_model():
     import argparse
