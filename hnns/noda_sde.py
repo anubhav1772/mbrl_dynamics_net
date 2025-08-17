@@ -407,7 +407,17 @@ class NODATrainer:
 
         return mean_loss, mean_recon, mean_state, mean_reward
 
-    def train(self, num_epochs=1000, wandb = None, tensorboard_writer = None):
+    def train(self, 
+            num_epochs=1000, 
+            wandb = None, 
+            tensorboard_writer = None, 
+            patience=5,  # stop if no improvement for 20 epochs
+            save_path="best_model.pth",
+            improvement_threshold = 0.01, # 1% (how much "relative" improvement we require)
+            ):
+    
+        best_holdout_loss = float('inf')
+        patience_counter = 0
         for epoch in range(num_epochs):
             train_loss, train_recon, train_state, train_reward = self.train_one_epoch()
             val_loss, val_recon, val_state, val_reward = self.evaluate_holdout()
@@ -426,6 +436,37 @@ class NODATrainer:
             print(f"Epoch {epoch+1}/{num_epochs} | "
                   f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
             # print(f"Epoch {epoch+1}/{num_epochs}, Total Loss: {mean_total_loss:.4f}, Recon Loss: {mean_recon_loss:.4f}, State Loss: {mean_state_loss:.4f}, Reward Loss: {mean_reward_loss:.4f}")
+
+            # Early stopping + checkpointing
+            # New loss must be at least 1% lower than the best so far
+            # relative_improvement = (best_holdout_loss - val_loss) / best_holdout_loss > 0.01
+            # val_loss < best_holdout_loss - 0.01*best_holdout_loss
+            # val_loss < best_holdout_loss*(1-0.01)
+            if val_loss < best_holdout_loss * (1 - improvement_threshold):  # >1% improvement
+                # # significant improvement
+                best_holdout_loss = val_loss
+                patience_counter = 0
+
+                # Save model checkpoint
+                torch.save({
+                    "epoch": epoch,
+                    "model_state_dict": self.model.state_dict(),
+                    "optimizer_state_dict": self.optimizer.state_dict(),
+                    "val_loss": val_loss,
+                }, save_path)
+
+                print(f"Checkpoint saved at epoch {epoch+1} with Val Loss {val_loss:.4f}")
+
+            else:
+                # # no improvement
+                patience_counter += 1
+
+            if patience_counter >= patience:
+                print(f"Early stopping at epoch {epoch+1}. "
+                      f"No improvement in {patience} epochs.")
+                break
+
+        print(f"Best model was saved at {save_path} with Val Loss {best_holdout_loss:.4f}")
 
 def train_dynamics_model():
     import argparse
