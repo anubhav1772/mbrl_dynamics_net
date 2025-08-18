@@ -480,6 +480,62 @@ class NODATrainer:
 
         print(f"Best model was saved at {save_path} with Val Loss {best_holdout_loss:.4f}")
 
+def evaluate_multistep_rollout(model, data, horizon=50, dt, device="cpu", num_rollouts=100):
+    """
+    Evaluate multi-step rollout prediction error of the dynamics model.
+
+    Args:
+        model: Trained dynamics model.
+        horizon: Number of steps to rollout (e.g., 50, 100).
+        dt: Integration timestep used during rollout.
+        num_rollouts: Number of random rollouts sampled from dataset for evaluation.
+
+    Returns:
+        mse_rollout: Mean Squared Error across horizon steps.
+        rollout_preds: Predicted rollout trajectories.
+        rollout_truth: Ground-truth rollout trajectories.
+    """
+    model.eval()
+
+    obss = torch.tensor(data["observations"], dtype=torch.float32).to(device)
+    actions = torch.tensor(data["actions"], dtype=torch.float32).to(device)
+    next_obss = torch.tensor(data["next_observations"], dtype=torch.float32).to(device)
+
+    data_size = obss.shape[0]
+
+    rollout_preds_all = []
+    rollout_truth_all = []
+
+    with torch.no_grad():
+        for _ in range(num_rollouts):
+            # Random starting index (ensure enough horizon steps ahead exist)
+            idx = torch.randint(0, data_size - horizon - 1, (1,)).item()
+
+            s_seq = obss[idx : idx + horizon + 1]     # [horizon+1, state_dim]
+            a_seq = actions[idx : idx + horizon]      # [horizon, action_dim]
+
+            # Ground-truth rollout (skip initial state)
+            rollout_truth = s_seq[1:]                 # [horizon, state_dim]
+
+            # Predict rollout
+            s_pred = s_seq[0].unsqueeze(0)            # initial state [1, state_dim]
+            rollout_pred = []
+            for t in range(horizon):
+                s_pred, _ = model.predict_state_reward(s_pred, a_seq[t].unsqueeze(0), dt)
+                rollout_pred.append(s_pred.squeeze(0))  # remove batch dim
+
+            rollout_pred = torch.stack(rollout_pred)   # [horizon, state_dim]
+
+            rollout_preds_all.append(rollout_pred)
+            rollout_truth_all.append(rollout_truth)
+
+        rollout_preds_all = torch.stack(rollout_preds_all)   # [num_rollouts, horizon, state_dim]
+        rollout_truth_all = torch.stack(rollout_truth_all)   # [num_rollouts, horizon, state_dim]
+
+        mse_rollout = F.mse_loss(rollout_preds_all, rollout_truth_all)
+
+    return mse_rollout.item(), rollout_preds_all, rollout_truth_all
+
 def train_dynamics_model():
     import argparse
     import random
@@ -575,6 +631,17 @@ def train_dynamics_model():
     else:
         noda_trainer.train(num_epochs=args.num_epochs, tensorboard_writer=tensorboard_writer)
         tensorboard_writer.close()
+
+    mse_rollout, preds, truth = evaluate_multistep_rollout(
+        model,
+        data, 
+        horizon=20,
+        dt=args.dt,
+        device=args.device,
+        num_rollouts=50
+    )
+
+    print(f"Multi-step rollout MSE (20 steps): {mse_rollout:.6f}")
 
     # Encode state
     # q, p, u = autoencoder.encode(s_t)
