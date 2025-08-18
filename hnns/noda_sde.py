@@ -19,6 +19,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
 from typing import Dict, List, Union, Tuple, Optional, Callable
 from mbrl_dynamics_net.utils.buffer import OfflineDatasetLoader
 from mbrl_dynamics_net.utils.logger import make_log_dirs
+from mbrl_dynamics_net.utils.scaler import StandardScaler
 from torch.utils.tensorboard import SummaryWriter
 
 from datetime import datetime
@@ -518,7 +519,7 @@ class NODATrainer:
 
         print(f"Best model was saved at {save_path} with Val Loss {best_holdout_loss:.4f}")
 
-def evaluate_multistep_rollout(model, data, horizon=50, dt, device="cpu", num_rollouts=100):
+def evaluate_multistep_rollout(model, data, dt, horizon=50, device="cpu", num_rollouts=100):
     """
     Evaluate multi-step rollout prediction error of the dynamics model.
 
