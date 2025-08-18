@@ -298,16 +298,54 @@ class NODATrainer:
         # Prepare data for batching (convert numpy arrays to torch tensors)
         obss, actions, next_obss, rewards = self.model.format_samples_for_training(data)
         
-        # Create a DataLoader for batching
-        self.dataset =  TensorDataset(torch.tensor(obss, dtype=torch.float32),
-                                        torch.tensor(actions, dtype=torch.float32),
-                                        torch.tensor(next_obss, dtype=torch.float32),
-                                        torch.tensor(rewards, dtype=torch.float32))
+        # self.dataset =  TensorDataset(torch.tensor(obss, dtype=torch.float32),
+        #                                 torch.tensor(actions, dtype=torch.float32),
+        #                                 torch.tensor(next_obss, dtype=torch.float32),
+        #                                 torch.tensor(rewards, dtype=torch.float32))
 
         data_size = obss.shape[0]
         holdout_size = min(int(data_size * holdout_ratio), 1000)
         train_size = data_size - holdout_size
-        train_dataset, holdout_dataset = random_split(self.dataset, [train_size, holdout_size])       
+
+        # train_dataset, holdout_dataset = random_split(self.dataset, [train_size, holdout_size])
+        # Seed for reproducibility
+        # g = torch.Generator().manual_seed(42)
+        # train_dataset, holdout_dataset = random_split(self.dataset, [train_size, holdout_size], generator=g)
+
+        indices = np.arange(data_size)
+        np.random.shuffle(indices)
+        train_idx, holdout_idx = indices[:train_size], indices[train_size:]
+
+        # Initialize scalers 
+        self.obs_scaler = StandardScaler() 
+        self.act_scaler = StandardScaler() 
+        # Already applied Min-Max scaling on reward in buffer
+        # self.rew_scaler = StandardScaler() 
+
+        # Fit on train split 
+        self.obs_scaler.fit(obss[train_idx]) 
+        self.act_scaler.fit(actions[train_idx]) 
+        # self.rew_scaler.fit(rewards[train_idx]) 
+
+        # Transform both train + holdout 
+        obss = self.obs_scaler.transform(obss) 
+        actions = self.act_scaler.transform(actions) 
+        next_obss = self.obs_scaler.transform(next_obss) # same obs scaler 
+        # rewards = self.rew_scaler.transform(rewards)
+
+        train_dataset = TensorDataset(
+            torch.tensor(obss[train_idx], dtype=torch.float32),
+            torch.tensor(actions[train_idx], dtype=torch.float32),
+            torch.tensor(next_obss[train_idx], dtype=torch.float32),
+            torch.tensor(rewards[train_idx], dtype=torch.float32),
+        )
+
+        holdout_dataset = TensorDataset(
+            torch.tensor(obss[holdout_idx], dtype=torch.float32),
+            torch.tensor(actions[holdout_idx], dtype=torch.float32),
+            torch.tensor(next_obss[holdout_idx], dtype=torch.float32),
+            torch.tensor(rewards[holdout_idx], dtype=torch.float32),
+        )
 
         self.train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
         self.holdout_loader = DataLoader(holdout_dataset, batch_size=64, shuffle=False)
