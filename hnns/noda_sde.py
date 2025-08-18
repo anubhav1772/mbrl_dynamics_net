@@ -427,11 +427,23 @@ class NODATrainer:
                 wandb.log({
                     "epoch": epoch,
                     "loss/train_total": train_loss,
+                    "loss/train_recon": train_recon,
+                    "loss/train_state":train_state,
+                    "loss/train_reward": train_reward,
                     "loss/val_total": val_loss,
+                    "loss/val_recon": val_recon,
+                    "loss/val_state":val_state,
+                    "loss/val_reward": val_reward,
                 })
             else:
                 tensorboard_writer.add_scalar("loss/train_total", train_loss, epoch)
+                tensorboard_writer.add_scalar("loss/train_recon", train_recon, epoch)
+                tensorboard_writer.add_scalar("loss/train_state", train_state, epoch)
+                tensorboard_writer.add_scalar("loss/train_reward", train_reward, epoch)
                 tensorboard_writer.add_scalar("loss/val_total", val_loss, epoch)
+                tensorboard_writer.add_scalar("loss/val_recon", val_recon, epoch)
+                tensorboard_writer.add_scalar("loss/val_state", val_state, epoch)
+                tensorboard_writer.add_scalar("loss/val_reward", val_reward, epoch)
 
             print(f"Epoch {epoch+1}/{num_epochs} | "
                   f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
@@ -458,7 +470,7 @@ class NODATrainer:
                 print(f"Checkpoint saved at epoch {epoch+1} with Val Loss {val_loss:.4f}")
 
             else:
-                # # no improvement
+                # No improvement
                 patience_counter += 1
 
             if patience_counter >= patience:
@@ -482,7 +494,7 @@ def train_dynamics_model():
     # NODA Trainer
     parser.add_argument("--lr", type=float, default=3e-4)       # learning rate
     parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--num_epochs", type=int, default=100)
+    parser.add_argument("--num_epochs", type=int, default=10)
     parser.add_argument("--dt", type=float, default=0.02)         # from control_dt (0.02 => 50 Hz)
     parser.add_argument("--alpha", type=float, default=0.5)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
