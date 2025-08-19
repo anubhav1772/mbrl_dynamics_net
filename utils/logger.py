@@ -23,6 +23,9 @@ BACKUP = 60
 DEFAULT_X_NAME = "timestep"
 ROOT_DIR = "log"
 
+def set_root(path: str):
+    global ROOT_DIR
+    ROOT_DIR = path
 
 class KVWriter(object):
     """
