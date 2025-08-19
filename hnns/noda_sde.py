@@ -592,7 +592,7 @@ def train_dynamics_model():
     # NODA Trainer
     parser.add_argument("--lr", type=float, default=3e-4)       # learning rate
     parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--num_epochs", type=int, default=5)
+    parser.add_argument("--num_epochs", type=int, default=50)
     parser.add_argument("--dt", type=float, default=0.02)         # from control_dt (0.02 => 50 Hz)
     parser.add_argument("--alpha", type=float, default=0.5)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
@@ -621,6 +621,7 @@ def train_dynamics_model():
             "run_name": args.run_name,
             }
         }
+    print(config)
 
     # Seed
     random.seed(args.seed)
@@ -678,6 +679,8 @@ def train_dynamics_model():
                         num_epochs=args.num_epochs, 
                         tensorboard_writer=tensorboard_writer,
                         save_path=os.path.join(log_dirs, "best_model.pth"))
+        # Ensures all logs are written
+        tensorboard_writer.flush()   
         tensorboard_writer.close()
 
     mse_rollout, preds, truth = evaluate_multistep_rollout(
