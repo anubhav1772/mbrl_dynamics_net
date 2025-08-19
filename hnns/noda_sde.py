@@ -22,6 +22,10 @@ from mbrl_dynamics_net.utils.logger import make_log_dirs
 from mbrl_dynamics_net.utils.scaler import StandardScaler
 from torch.utils.tensorboard import SummaryWriter
 
+from mbrl_dynamics_net.utils import logger
+# Log directory path
+logger.set_root(os.path.join(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")), "log"))
+
 from datetime import datetime
 import wandb
 
@@ -588,7 +592,7 @@ def train_dynamics_model():
     # NODA Trainer
     parser.add_argument("--lr", type=float, default=3e-4)       # learning rate
     parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--num_epochs", type=int, default=10)
+    parser.add_argument("--num_epochs", type=int, default=5)
     parser.add_argument("--dt", type=float, default=0.02)         # from control_dt (0.02 => 50 Hz)
     parser.add_argument("--alpha", type=float, default=0.5)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
@@ -665,9 +669,15 @@ def train_dynamics_model():
                           device=args.device)
 
     if use_wandb:
-        noda_trainer.train(num_epochs=args.num_epochs, wandb=wandb)
+        noda_trainer.train(
+                        num_epochs=args.num_epochs, 
+                        wandb=wandb, 
+                        save_path=os.path.join(log_dirs, "best_model.pth"))
     else:
-        noda_trainer.train(num_epochs=args.num_epochs, tensorboard_writer=tensorboard_writer)
+        noda_trainer.train(
+                        num_epochs=args.num_epochs, 
+                        tensorboard_writer=tensorboard_writer,
+                        save_path=os.path.join(log_dirs, "best_model.pth"))
         tensorboard_writer.close()
 
     mse_rollout, preds, truth = evaluate_multistep_rollout(
