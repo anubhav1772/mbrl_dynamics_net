@@ -422,18 +422,17 @@ class NODATrainer:
     #     return mean_loss, mean_recon_loss, mean_state_loss, mean_reward_loss
 
     def evaluate_holdout(self):
-        """Evaluate model on holdout/validation set (no gradient updates)."""
+        """Evaluate model on holdout/validation set."""
         self.model.eval()
         total_loss, total_recon, total_state, total_reward = 0, 0, 0, 0
 
-        with torch.no_grad():
-            for batch in self.holdout_loader:
-                obss, actions, next_obss, rewards = [x.to(self.device) for x in batch]
+        for batch in self.holdout_loader:
+            obss, actions, next_obss, rewards = [x.to(self.device) for x in batch]
 
-                loss, loss_recon, loss_state, loss_reward = self.model.compute_loss(
-                    obss, actions, next_obss, rewards, self.dt, self.alpha
-                )
+            loss, loss_recon, loss_state, loss_reward = self.model.compute_loss(
+                    obss, actions, next_obss, rewards, self.dt, self.alpha)
 
+            with torch.no_grad():
                 total_loss += loss.item()
                 total_recon += loss_recon.item()
                 total_state += loss_state.item()
