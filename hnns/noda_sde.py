@@ -28,6 +28,7 @@ logger.set_root(os.path.join(os.path.abspath(os.path.join(os.path.dirname(__file
 
 from datetime import datetime
 import wandb
+import joblib
 
 class AutoEncoder(nn.Module):
     def __init__(self, input_dim, latent_dim) -> None:  
@@ -322,8 +323,9 @@ class NODATrainer:
         train_idx, holdout_idx = indices[:train_size], indices[train_size:]
 
         # Initialize scalers 
-        self.obs_scaler = StandardScaler() 
-        self.act_scaler = StandardScaler() 
+        # # StandardScaler for normalizing inputs
+        self.obs_scaler = StandardScaler(name="obs") 
+        self.act_scaler = StandardScaler(name="act") 
         # Already applied Min-Max scaling on reward in buffer
         # self.rew_scaler = StandardScaler() 
 
@@ -501,16 +503,9 @@ class NODATrainer:
                 best_holdout_loss = val_loss
                 patience_counter = 0
 
-                # Save model checkpoint
-                torch.save({
-                    "epoch": epoch,
-                    "model_state_dict": self.model.state_dict(),
-                    "optimizer_state_dict": self.optimizer.state_dict(),
-                    "val_loss": val_loss,
-                }, save_path)
-
-                print(f"Checkpoint saved at epoch {epoch+1} with Val Loss {val_loss:.4f}")
-
+                # Save model checkpoint, scalar
+                # self.save(epoch, val_loss, save_path)
+                self.save(save_path)
             else:
                 # No improvement
                 patience_counter += 1
@@ -521,6 +516,38 @@ class NODATrainer:
                 break
 
         print(f"Best model was saved at {save_path} with Val Loss {best_holdout_loss:.4f}")
+
+    def save(self, save_path):
+        torch.save({
+            #"epoch": epoch,
+            #"val_loss": val_loss,
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+        }, os.path.join(save_path, "best_model.pth"))
+
+        # Save scalers
+        # joblib.dump(self.obs_scaler, os.path.join(save_path, "obs_scaler.pkl"))
+        # joblib.dump(self.act_scaler, os.path.join(save_path, "act_scaler.pkl"))
+        # self.obs_scaler.save_scaler(save_path)
+        # self.act_scaler.save_scaler(save_path)
+        self.obs_scaler.save_scaler_combined(save_path)
+        self.act_scaler.save_scaler_combined(save_path)
+
+        # print(f"Checkpoint saved at epoch {epoch+1} with Val Loss {val_loss:.4f}")
+
+    def load(self, load_path):
+        # Load model
+        checkpoint = torch.load(os.path.join(load_path, "best_model.pth"))
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+        # Load scalers
+        # obs_scaler = joblib.load(os.path.join(save_path, "obs_scaler.pkl"))
+        # act_scaler = joblib.load(os.path.join(save_path, "act_scaler.pkl"))
+        # self.obs_scaler.load_scaler(load_path)
+        # self.act_scaler.load_scaler(load_path)
+        self.obs_scaler.load_scaler_combined(load_path)
+        self.act_scaler.load_scaler_combined(load_path)
 
 def evaluate_multistep_rollout(model, data, dt, horizon=50, device="cpu", num_rollouts=100):
     """
@@ -673,12 +700,12 @@ def train_dynamics_model():
         noda_trainer.train(
                         num_epochs=args.num_epochs, 
                         wandb=wandb, 
-                        save_path=os.path.join(log_dirs, "best_model.pth"))
+                        save_path=log_dirs)
     else:
         noda_trainer.train(
                         num_epochs=args.num_epochs, 
                         tensorboard_writer=tensorboard_writer,
-                        save_path=os.path.join(log_dirs, "best_model.pth"))
+                        save_path=log_dirs)
         # Ensures all logs are written
         tensorboard_writer.flush()   
         tensorboard_writer.close()
