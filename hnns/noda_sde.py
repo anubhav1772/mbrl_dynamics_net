@@ -295,6 +295,7 @@ class NODA(nn.Module):
 class NODATrainer:
     def __init__(self, model, data, batch_size, lr, dt, alpha, holdout_ratio=0.15, device='cpu'):
         self.model = model.to(device)
+        self.data = data
         self.device = device
         self.batch_size = batch_size
         self.dt = dt
@@ -549,61 +550,71 @@ class NODATrainer:
         self.obs_scaler.load_scaler_combined(load_path)
         self.act_scaler.load_scaler_combined(load_path)
 
-def evaluate_multistep_rollout(model, data, dt, horizon=50, device="cpu", num_rollouts=100):
-    """
-    Evaluate multi-step rollout prediction error of the dynamics model.
+    def evaluate_multistep_rollout(self, horizon=50, num_rollouts=100):
+        """
+        Evaluate multi-step rollout prediction error of the dynamics model.
 
-    Args:
-        model: Trained dynamics model.
-        horizon: Number of steps to rollout (e.g., 50, 100).
-        dt: Integration timestep used during rollout.
-        num_rollouts: Number of random rollouts sampled from dataset for evaluation.
+        Args:
+            model: Trained dynamics model.
+            horizon: Number of steps to rollout (e.g., 50, 100).
+            dt: Integration timestep used during rollout.
+            num_rollouts: Number of random rollouts sampled from dataset for evaluation.
 
-    Returns:
-        mse_rollout: Mean Squared Error across horizon steps.
-        rollout_preds: Predicted rollout trajectories.
-        rollout_truth: Ground-truth rollout trajectories.
-    """
-    model.eval()
+        Returns:
+            mse_rollout: Mean Squared Error across horizon steps.
+            rollout_preds: Predicted rollout trajectories.
+            rollout_truth: Ground-truth rollout trajectories.
+        """
+        self.model.eval()
 
-    obss = torch.tensor(data["observations"], dtype=torch.float32).to(device)
-    actions = torch.tensor(data["actions"], dtype=torch.float32).to(device)
-    next_obss = torch.tensor(data["next_observations"], dtype=torch.float32).to(device)
+        # obss = torch.tensor(self.data["observations"], dtype=torch.float32).to(self.device)
+        # actions = torch.tensor(self.data["actions"], dtype=torch.float32).to(self.device)
+        # next_obss = torch.tensor(self.data["next_observations"], dtype=torch.float32).to(self.device)
 
-    data_size = obss.shape[0]
+        obss, actions, next_obss, rewards = self.model.format_samples_for_training(self.data)
 
-    rollout_preds_all = []
-    rollout_truth_all = []
-    
-    for _ in range(num_rollouts):
-        # Random starting index (ensure enough horizon steps ahead exist)
-        idx = torch.randint(0, data_size - horizon - 1, (1,)).item()
+        data_size = obss.shape[0]
 
-        s_seq = obss[idx : idx + horizon + 1]     # [horizon+1, state_dim]
-        a_seq = actions[idx : idx + horizon]      # [horizon, action_dim]
+        obss = self.obs_scaler.transform(obss) 
+        actions = self.act_scaler.transform(actions) 
+        next_obss = self.obs_scaler.transform(next_obss) # same obs scaler 
 
-        # Ground-truth rollout (skip initial state)
-        rollout_truth = s_seq[1:]                 # [horizon, state_dim]
+        obss = torch.tensor(obss, dtype=torch.float32).to(self.device)
+        actions = torch.tensor(actions, dtype=torch.float32).to(self.device)
+        next_obss = torch.tensor(next_obss, dtype=torch.float32).to(self.device)
 
-        # Predict rollout
-        s_pred = s_seq[0].unsqueeze(0)            # initial state [1, state_dim]
-        rollout_pred = []
-        for t in range(horizon):
-            # allow gradients inside predict_state_reward (Hamiltonian dynamics needs autograd)
-            s_pred, _ = model.predict_state_reward(s_pred, a_seq[t].unsqueeze(0), dt)
-            rollout_pred.append(s_pred.squeeze(0))  # remove batch dim
+        rollout_preds_all = []
+        rollout_truth_all = []
+        
+        for _ in range(num_rollouts):
+            # Random starting index (ensure enough horizon steps ahead exist)
+            idx = torch.randint(0, data_size - horizon - 1, (1,)).item()
 
-        rollout_pred = torch.stack(rollout_pred)   # [horizon, state_dim]
+            s_seq = obss[idx : idx + horizon + 1]     # [horizon+1, state_dim]
+            a_seq = actions[idx : idx + horizon]      # [horizon, action_dim]
 
-        rollout_preds_all.append(rollout_pred)
-        rollout_truth_all.append(rollout_truth)
+            # Ground-truth rollout (skip initial state)
+            rollout_truth = s_seq[1:]                 # [horizon, state_dim]
 
-    with torch.no_grad():
-        rollout_preds_all = torch.stack(rollout_preds_all)   # [num_rollouts, horizon, state_dim]
-        rollout_truth_all = torch.stack(rollout_truth_all)   # [num_rollouts, horizon, state_dim]
-        mse_rollout = F.mse_loss(rollout_preds_all, rollout_truth_all)
+            # Predict rollout
+            s_pred = s_seq[0].unsqueeze(0)            # initial state [1, state_dim]
+            rollout_pred = []
+            for t in range(horizon):
+                # allow gradients inside predict_state_reward (Hamiltonian dynamics needs autograd)
+                s_pred, _ = self.model.predict_state_reward(s_pred, a_seq[t].unsqueeze(0), self.dt)
+                rollout_pred.append(s_pred.squeeze(0))  # remove batch dim
 
-    return mse_rollout.item(), rollout_preds_all, rollout_truth_all
+            rollout_pred = torch.stack(rollout_pred)   # [horizon, state_dim]
+
+            rollout_preds_all.append(rollout_pred)
+            rollout_truth_all.append(rollout_truth)
+
+        with torch.no_grad():
+            rollout_preds_all = torch.stack(rollout_preds_all)   # [num_rollouts, horizon, state_dim]
+            rollout_truth_all = torch.stack(rollout_truth_all)   # [num_rollouts, horizon, state_dim]
+            mse_rollout = F.mse_loss(rollout_preds_all, rollout_truth_all)
+
+        return mse_rollout.item(), rollout_preds_all, rollout_truth_all
 
 def train_dynamics_model():
     import argparse
@@ -625,7 +636,9 @@ def train_dynamics_model():
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--data_load_path", type=str, default="mbrl_dynamics_net/dataset/PreprocessedDataset/train")
     parser.add_argument("--preprocess", type=bool, default=True)
-    parser.add_argument('--run_name', type=str, default=f"NODA_{datetime.now().strftime('%Y%m%d_%H%M%S')}", help='used for logging to distingush different runs')
+    # parser.add_argument('--run_name', type=str, default=f"NODA_{datetime.now().strftime('%Y%m%d_%H%M%S')}", help='used for logging to distingush different runs')
+    parser.add_argument('--run_name', type=str, default=f"NODA", help='used for logging')
+    parser.add_argument('--retrain', type=bool, default=False, help='flag to initiate training')
 
     args = parser.parse_args()
 
@@ -686,7 +699,7 @@ def train_dynamics_model():
         # Logger
         log_dirs = make_log_dirs(args.task, 'dynamics', args.seed, vars(args), run_name=args.run_name)
         print(f"log_dirs = {log_dirs}")
-        tensorboard_writer = SummaryWriter(log_dir=log_dirs)
+        tensorboard_writer = SummaryWriter(log_dir=os.path.join(log_dirs, "tensorboard"))
 
     model = NODA(args.input_dim, args.latent_dim, args.action_dim, device=args.device)
     noda_trainer = NODATrainer(model, data, 
@@ -696,29 +709,27 @@ def train_dynamics_model():
                           alpha=args.alpha, 
                           device=args.device)
 
-    if use_wandb:
-        noda_trainer.train(
-                        num_epochs=args.num_epochs, 
-                        wandb=wandb, 
-                        save_path=log_dirs)
+    if os.path.isfile(os.path.join(log_dirs, "best_model.pth")) and args.retrain == False:
+        print(f"Trained dynamics exists at {log_dirs}, loading...")
+        # dynamics
+        noda_trainer.load(log_dirs)
+        print("Load successful!!")
     else:
-        noda_trainer.train(
-                        num_epochs=args.num_epochs, 
-                        tensorboard_writer=tensorboard_writer,
-                        save_path=log_dirs)
-        # Ensures all logs are written
-        tensorboard_writer.flush()   
-        tensorboard_writer.close()
+        if use_wandb:
+            noda_trainer.train(
+                            num_epochs=args.num_epochs, 
+                            wandb=wandb, 
+                            save_path=log_dirs)
+        else:
+            noda_trainer.train(
+                            num_epochs=args.num_epochs, 
+                            tensorboard_writer=tensorboard_writer,
+                            save_path=log_dirs)
+            # Ensures all logs are written
+            tensorboard_writer.flush()   
+            tensorboard_writer.close()
 
-    mse_rollout, preds, truth = evaluate_multistep_rollout(
-        model,
-        data, 
-        horizon=20,
-        dt=args.dt,
-        device=args.device,
-        num_rollouts=50
-    )
-
+    mse_rollout, preds, truth = noda_trainer.evaluate_multistep_rollout(horizon=20, num_rollouts=50)
     print(f"Multi-step rollout MSE (20 steps): {mse_rollout:.6f}")
 
     # Encode state
