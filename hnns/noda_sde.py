@@ -550,20 +550,21 @@ class NODATrainer:
         self.obs_scaler.load_scaler_combined(load_path)
         self.act_scaler.load_scaler_combined(load_path)
 
-    def evaluate_multistep_rollout(self, horizon=50, num_rollouts=100):
+    def evaluate_multistep_rollout(self, horizons=[5, 10, 20, 50], num_rollouts=100):
         """
         Evaluate multi-step rollout prediction error of the dynamics model.
 
         Args:
             model: Trained dynamics model.
-            horizon: Number of steps to rollout (e.g., 50, 100).
+            horizon: List of rollout horizons to test (e.g., [5, 10, 20, 50]).
             dt: Integration timestep used during rollout.
             num_rollouts: Number of random rollouts sampled from dataset for evaluation.
 
         Returns:
-            mse_rollout: Mean Squared Error across horizon steps.
-            rollout_preds: Predicted rollout trajectories.
-            rollout_truth: Ground-truth rollout trajectories.
+            mse_dict: Dict {horizon: (scaled_mse, real_mse)} for each horizon. Mean Squared Error across horizon steps
+
+            #rollout_preds: Predicted rollout trajectories.
+            #rollout_truth: Ground-truth rollout trajectories.
         """
         self.model.eval()
 
@@ -583,38 +584,72 @@ class NODATrainer:
         actions = torch.tensor(actions, dtype=torch.float32).to(self.device)
         next_obss = torch.tensor(next_obss, dtype=torch.float32).to(self.device)
 
-        rollout_preds_all = []
-        rollout_truth_all = []
-        
-        for _ in range(num_rollouts):
-            # Random starting index (ensure enough horizon steps ahead exist)
-            idx = torch.randint(0, data_size - horizon - 1, (1,)).item()
+        mse_dict = {}
 
-            s_seq = obss[idx : idx + horizon + 1]     # [horizon+1, state_dim]
-            a_seq = actions[idx : idx + horizon]      # [horizon, action_dim]
+        for horizon in horizons:
+            rollout_preds_all, rollout_truth_all = [], []
+            
+            for _ in range(num_rollouts):
+                # Random starting index (ensure enough horizon steps ahead exist)
+                idx = torch.randint(0, data_size - horizon - 1, (1,)).item()
 
-            # Ground-truth rollout (skip initial state)
-            rollout_truth = s_seq[1:]                 # [horizon, state_dim]
+                s_seq = obss[idx : idx + horizon + 1]     # [horizon+1, state_dim]
+                a_seq = actions[idx : idx + horizon]      # [horizon, action_dim]
 
-            # Predict rollout
-            s_pred = s_seq[0].unsqueeze(0)            # initial state [1, state_dim]
-            rollout_pred = []
-            for t in range(horizon):
-                # allow gradients inside predict_state_reward (Hamiltonian dynamics needs autograd)
-                s_pred, _ = self.model.predict_state_reward(s_pred, a_seq[t].unsqueeze(0), self.dt)
-                rollout_pred.append(s_pred.squeeze(0))  # remove batch dim
+                # Ground-truth rollout (skip initial state)
+                rollout_truth = s_seq[1:]                 # [horizon, state_dim]
 
-            rollout_pred = torch.stack(rollout_pred)   # [horizon, state_dim]
+                # Predict rollout
+                s_pred = s_seq[0].unsqueeze(0)            # initial state [1, state_dim]
+                rollout_pred = []
+                
+                for t in range(horizon):
+                    # allow gradients inside predict_state_reward (Hamiltonian dynamics needs autograd)
+                    s_pred, _ = self.model.predict_state_reward(s_pred, a_seq[t].unsqueeze(0), self.dt)
+                    rollout_pred.append(s_pred.squeeze(0))  # remove batch dim
 
-            rollout_preds_all.append(rollout_pred)
-            rollout_truth_all.append(rollout_truth)
+                rollout_pred = torch.stack(rollout_pred)   # [horizon, state_dim]
 
-        with torch.no_grad():
-            rollout_preds_all = torch.stack(rollout_preds_all)   # [num_rollouts, horizon, state_dim]
-            rollout_truth_all = torch.stack(rollout_truth_all)   # [num_rollouts, horizon, state_dim]
-            mse_rollout = F.mse_loss(rollout_preds_all, rollout_truth_all)
+                rollout_preds_all.append(rollout_pred)
+                rollout_truth_all.append(rollout_truth)
 
-        return mse_rollout.item(), rollout_preds_all, rollout_truth_all
+            with torch.no_grad():
+                # Normalized/Scaled Space
+                rollout_preds_all = torch.stack(rollout_preds_all)   # [num_rollouts, horizon, state_dim]
+                rollout_truth_all = torch.stack(rollout_truth_all)   # [num_rollouts, horizon, state_dim]
+                # Compute scaled-space error 
+                mse_rollout_norm = F.mse_loss(rollout_preds_all, rollout_truth_all)
+
+                # Unnormalized/Original/Real (inverse-transformed) Space
+                # rollout_preds_all = torch.tensor(
+                #     self.obs_scaler.inverse_transform(rollout_preds_all.cpu().numpy()), 
+                #     dtype=torch.float32, device=self.device
+                # )
+
+                # rollout_truth_all = torch.tensor(
+                #     self.obs_scaler.inverse_transform(rollout_truth_all.cpu().numpy()), 
+                #     dtype=torch.float32, device=self.device
+                # )
+
+                # [N, H, D] -> [N*H, D] ([num_rollouts*horizon, state_dim]) -> Inverse Transform -> [N, H, D]
+                rollout_preds_real = self.obs_scaler.inverse_transform(
+                    rollout_preds_all.cpu().numpy().reshape(-1, obss.shape[-1])
+                ).reshape(num_rollouts, horizon, -1)
+
+                rollout_truth_real = self.obs_scaler.inverse_transform(
+                    rollout_truth_all.cpu().numpy().reshape(-1, obss.shape[-1])
+                ).reshape(num_rollouts, horizon, -1)
+
+                rollout_preds_real = torch.tensor(rollout_preds_real, dtype=torch.float32)
+                rollout_truth_real = torch.tensor(rollout_truth_real, dtype=torch.float32)
+
+                mse_rollout_real = F.mse_loss(rollout_preds_real, rollout_truth_real)
+
+                mse_dict[horizon] = (mse_rollout_norm, mse_rollout_real)
+
+                print(f"Rollout Horizon {horizon}: Scaled MSE={mse_rollout_norm:.6f}, Real MSE={mse_rollout_real:.6f}")
+
+        return mse_dict
 
 def train_dynamics_model():
     import argparse
@@ -729,8 +764,9 @@ def train_dynamics_model():
             tensorboard_writer.flush()   
             tensorboard_writer.close()
 
-    mse_rollout, preds, truth = noda_trainer.evaluate_multistep_rollout(horizon=20, num_rollouts=50)
-    print(f"Multi-step rollout MSE (20 steps): {mse_rollout:.6f}")
+    mse_dict = noda_trainer.evaluate_multistep_rollout(horizons=[5, 10, 20, 50], num_rollouts=50)
+    print(mse_dict)
+    # print(f"Multi-step rollout MSE (20 steps): {mse_rollout:.6f}")
 
     # Encode state
     # q, p, u = autoencoder.encode(s_t)
