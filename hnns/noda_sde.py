@@ -654,6 +654,7 @@ class NODATrainer:
 def train_dynamics_model():
     import argparse
     import random
+    import matplotlib.pyplot as plt
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", type=str, default="aliengo")
@@ -674,6 +675,7 @@ def train_dynamics_model():
     # parser.add_argument('--run_name', type=str, default=f"NODA_{datetime.now().strftime('%Y%m%d_%H%M%S')}", help='used for logging to distingush different runs')
     parser.add_argument('--run_name', type=str, default=f"NODA", help='used for logging')
     parser.add_argument('--retrain', type=bool, default=False, help='flag to initiate training')
+    parser.add_argument('--horizons', type=int, nargs='*', default=[5, 10, 20, 50, 100], help='List of rollout horizons to test')
 
     args = parser.parse_args()
 
@@ -764,9 +766,24 @@ def train_dynamics_model():
             tensorboard_writer.flush()   
             tensorboard_writer.close()
 
-    mse_dict = noda_trainer.evaluate_multistep_rollout(horizons=[5, 10, 20, 50], num_rollouts=50)
-    print(mse_dict)
-    # print(f"Multi-step rollout MSE (20 steps): {mse_rollout:.6f}")
+    mse_dict = noda_trainer.evaluate_multistep_rollout(horizons=args.horizons, num_rollouts=50)
+    
+    mse_rollout_norm, mse_rollout_real = [], []
+    for v in mse_dict.values():
+        mse_rollout_norm.append(v[0].item())
+        mse_rollout_real.append(v[0].item())
+
+    plt.figure(figsize=(8,5))
+    plt.plot(args.horizons, mse_rollout_norm, marker="o", label="Scaled MSE")
+    plt.plot(args.horizons, mse_rollout_real, marker="s", label="Real MSE")
+
+    plt.xlabel("Rollout Horizon")
+    plt.ylabel("MSE")
+    plt.title("Multi-step Rollout MSE vs Horizon")
+    plt.legend()
+    plt.grid(True)
+
+    plt.show()
 
     # Encode state
     # q, p, u = autoencoder.encode(s_t)
