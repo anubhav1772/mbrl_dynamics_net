@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from torch.utils.data import random_split, DataLoader, TensorDataset
+import matplotlib.pyplot as plt
 import sys
 import os
 # Add the parent folder of `mbrl_dynamics_net` to Python path
@@ -589,6 +590,7 @@ class NODATrainer:
         for horizon in horizons:
             rollout_preds_all, rollout_truth_all = [], []
             
+            # collect rollouts
             for _ in range(num_rollouts):
                 # Random starting index (ensure enough horizon steps ahead exist)
                 idx = torch.randint(0, data_size - horizon - 1, (1,)).item()
@@ -631,30 +633,158 @@ class NODATrainer:
                 #     dtype=torch.float32, device=self.device
                 # )
 
-                # [N, H, D] -> [N*H, D] ([num_rollouts*horizon, state_dim]) -> Inverse Transform -> [N, H, D]
-                rollout_preds_real = self.obs_scaler.inverse_transform(
-                    rollout_preds_all.cpu().numpy().reshape(-1, obss.shape[-1])
-                ).reshape(num_rollouts, horizon, -1)
+                # # [N, H, D] -> [N*H, D] ([num_rollouts*horizon, state_dim]) -> Inverse Transform -> [N, H, D]
+                # rollout_preds_real = self.obs_scaler.inverse_transform(
+                #     rollout_preds_all.cpu().numpy().reshape(-1, obss.shape[-1])
+                # ).reshape(num_rollouts, horizon, -1)
 
-                rollout_truth_real = self.obs_scaler.inverse_transform(
-                    rollout_truth_all.cpu().numpy().reshape(-1, obss.shape[-1])
-                ).reshape(num_rollouts, horizon, -1)
+                # rollout_truth_real = self.obs_scaler.inverse_transform(
+                #     rollout_truth_all.cpu().numpy().reshape(-1, obss.shape[-1])
+                # ).reshape(num_rollouts, horizon, -1)
 
-                rollout_preds_real = torch.tensor(rollout_preds_real, dtype=torch.float32)
-                rollout_truth_real = torch.tensor(rollout_truth_real, dtype=torch.float32)
+                # rollout_preds_real = torch.tensor(rollout_preds_real, dtype=torch.float32)
+                # rollout_truth_real = torch.tensor(rollout_truth_real, dtype=torch.float32)
 
-                mse_rollout_real = F.mse_loss(rollout_preds_real, rollout_truth_real)
+                # mse_rollout_real = F.mse_loss(rollout_preds_real, rollout_truth_real)
 
-                mse_dict[horizon] = (mse_rollout_norm, mse_rollout_real)
+                # mse_dict[horizon] = (mse_rollout_norm, mse_rollout_real)
+                mse_dict[horizon] = mse_rollout_norm
 
-                print(f"Rollout Horizon {horizon}: Scaled MSE={mse_rollout_norm:.6f}, Real MSE={mse_rollout_real:.6f}")
+                # print(f"Rollout Horizon {horizon}: Scaled MSE={mse_rollout_norm:.6f}, Real MSE={mse_rollout_real:.6f}")
+                print(f"Rollout Horizon {horizon}: Scaled MSE={mse_rollout_norm:.6f}")
 
         return mse_dict
+
+    def evaluate_multistep_rollout_with_variance(self, horizons=[5, 10, 20, 50], num_rollouts=100):
+        """
+        Evaluate multi-step rollout prediction error of the dynamics model.
+        Returns both mean and variance across multiple rollouts.
+
+        Args:
+            horizons: list of rollout horizons to test
+            num_rollouts: number of random rollouts sampled
+
+        Returns:
+            mse_dict: {horizon: {
+                "scaled_mean": ..., "scaled_std": ...,
+                "real_mean": ..., "real_std": ...
+            }}
+        """
+        self.model.eval()
+
+        obss, actions, next_obss, rewards = self.model.format_samples_for_training(self.data)
+
+        data_size = obss.shape[0]
+
+        # Normalize with same scalers as training
+        obss = self.obs_scaler.transform(obss)
+        actions = self.act_scaler.transform(actions)
+        next_obss = self.obs_scaler.transform(next_obss)
+
+        obss = torch.tensor(obss, dtype=torch.float32).to(self.device)
+        actions = torch.tensor(actions, dtype=torch.float32).to(self.device)
+
+        mse_dict = {}
+
+        for horizon in horizons:
+            rollout_preds_all, rollout_truth_all = [], []
+
+            # collect rollouts
+            for _ in range(num_rollouts):
+                idx = torch.randint(0, data_size - horizon - 1, (1,)).item()
+
+                s_seq = obss[idx : idx + horizon + 1]
+                a_seq = actions[idx : idx + horizon]
+
+                rollout_truth = s_seq[1:]  # ground-truth rollout
+                s_pred = s_seq[0].unsqueeze(0)
+
+                rollout_pred = []
+                for t in range(horizon):
+                    s_pred, _ = self.model.predict_state_reward(
+                        s_pred, a_seq[t].unsqueeze(0), self.dt
+                    )
+                    rollout_pred.append(s_pred.squeeze(0))
+
+                rollout_preds_all.append(torch.stack(rollout_pred))
+                rollout_truth_all.append(rollout_truth)
+
+            # stack rollouts
+            rollout_preds_all = torch.stack(rollout_preds_all)   # [num_rollouts, horizon, state_dim]
+            rollout_truth_all = torch.stack(rollout_truth_all)
+
+            with torch.no_grad():
+                # Scaled space 
+                mse_scaled_per_rollout = F.mse_loss(
+                    rollout_preds_all, rollout_truth_all, reduction="none"
+                ).mean(dim=(1, 2))  # [num_rollouts]
+
+                scaled_mean = mse_scaled_per_rollout.mean().item()
+                scaled_std = mse_scaled_per_rollout.std().item()
+
+                # # Real (inverse-transform) space 
+                # rollout_preds_real = self.obs_scaler.inverse_transform(
+                #     rollout_preds_all.cpu().numpy().reshape(-1, obss.shape[-1])
+                # ).reshape(num_rollouts, horizon, -1)
+
+                # rollout_truth_real = self.obs_scaler.inverse_transform(
+                #     rollout_truth_all.cpu().numpy().reshape(-1, obss.shape[-1])
+                # ).reshape(num_rollouts, horizon, -1)
+
+                # rollout_preds_real = torch.tensor(rollout_preds_real, dtype=torch.float32)
+                # rollout_truth_real = torch.tensor(rollout_truth_real, dtype=torch.float32)
+
+                # mse_real_per_rollout = F.mse_loss(
+                #     rollout_preds_real, rollout_truth_real, reduction="none"
+                # ).mean(dim=(1, 2))  # [num_rollouts]
+
+                # real_mean = mse_real_per_rollout.mean().item()
+                # real_std = mse_real_per_rollout.std().item()
+
+            mse_dict[horizon] = {
+                "scaled_mean": scaled_mean,
+                "scaled_std": scaled_std,
+                # "real_mean": real_mean,
+                # "real_std": real_std,
+            }
+
+            print(
+                f"H={horizon}: "
+                f"Scaled MSE={scaled_mean:.6f} ± {scaled_std:.6f}, "
+                # f"Real MSE={real_mean:.6f} ± {real_std:.6f}"
+            )
+
+        return mse_dict
+
+    def plot_rollout_mse_with_variance(self, horizons, scaled_stats, num_rollouts=100):
+        mse_scaled_means, mse_scaled_stds = scaled_stats
+        # mse_real_means, mse_real_stds = real_stats
+
+        plt.figure(figsize=(8, 6))
+
+        # Plot with shaded variance bands
+        plt.plot(horizons, mse_scaled_means, label="Scaled MSE", marker='o')
+        plt.fill_between(horizons,
+                         np.array(mse_scaled_means) - np.array(mse_scaled_stds),
+                         np.array(mse_scaled_means) + np.array(mse_scaled_stds),
+                         alpha=0.2)
+
+        # plt.plot(horizons, mse_real_means, label="Real-space MSE", marker='o')
+        # plt.fill_between(horizons,
+        #                  np.array(mse_real_means) - np.array(mse_real_stds),
+        #                  np.array(mse_real_means) + np.array(mse_real_stds),
+        #                  alpha=0.2)
+
+        plt.xlabel("Rollout Horizon (steps)")
+        plt.ylabel("Mean Squared Error")
+        plt.title(f"Rollout Prediction Error Growth\n num_rollouts: {num_rollouts}")
+        plt.legend()
+        plt.grid(True)
+        plt.show()
 
 def train_dynamics_model():
     import argparse
     import random
-    import matplotlib.pyplot as plt
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", type=str, default="aliengo")
@@ -766,24 +896,40 @@ def train_dynamics_model():
             tensorboard_writer.flush()   
             tensorboard_writer.close()
 
-    mse_dict = noda_trainer.evaluate_multistep_rollout(horizons=args.horizons, num_rollouts=50)
+    # mse_dict = noda_trainer.evaluate_multistep_rollout(horizons=args.horizons, num_rollouts=50)
     
-    mse_rollout_norm, mse_rollout_real = [], []
-    for v in mse_dict.values():
-        mse_rollout_norm.append(v[0].item())
-        mse_rollout_real.append(v[1].item())
+    # mse_rollout_norm, mse_rollout_real = [], []
+    # for v in mse_dict.values():
+    #     mse_rollout_norm.append(v[0].item())
+    #     mse_rollout_real.append(v[1].item())
 
-    plt.figure(figsize=(8,5))
-    plt.plot(args.horizons, mse_rollout_norm, marker="o", label="Scaled MSE")
-    plt.plot(args.horizons, mse_rollout_real, marker="s", label="Real MSE")
+    # plt.figure(figsize=(8,5))
+    # plt.plot(args.horizons, mse_rollout_norm, marker="o", label="Scaled MSE")
+    # plt.plot(args.horizons, mse_rollout_real, marker="s", label="Real MSE")
 
-    plt.xlabel("Rollout Horizon")
-    plt.ylabel("MSE")
-    plt.title("Multi-step Rollout MSE vs Horizon")
-    plt.legend()
-    plt.grid(True)
+    # plt.xlabel("Rollout Horizon")
+    # plt.ylabel("MSE")
+    # plt.title("Multi-step Rollout MSE vs Horizon")
+    # plt.legend()
+    # plt.grid(True)
 
-    plt.show()
+    # plt.show()
+
+    mse_dict = noda_trainer.evaluate_multistep_rollout_with_variance(horizons=args.horizons, num_rollouts=100)
+
+    mse_scaled_means, mse_scaled_stds = [], []
+    # mse_real_means, mse_real_stds = [], []
+
+    for horizon in args.horizons:
+        mse_scaled_means.append(mse_dict[horizon]["scaled_mean"])
+        mse_scaled_stds.append(mse_dict[horizon]["scaled_std"])
+        # mse_real_means.append(mse_dict[horizon]["real_mean"])
+        # mse_real_stds.append(mse_dict[horizon]["real_std"])
+
+    scaled_stats = (mse_scaled_means, mse_scaled_stds)
+
+    noda_trainer.plot_rollout_mse_with_variance(args.horizons, scaled_stats, num_rollouts=100)
+
 
     # Encode state
     # q, p, u = autoencoder.encode(s_t)
