@@ -675,7 +675,7 @@ def train_dynamics_model():
     # parser.add_argument('--run_name', type=str, default=f"NODA_{datetime.now().strftime('%Y%m%d_%H%M%S')}", help='used for logging to distingush different runs')
     parser.add_argument('--run_name', type=str, default=f"NODA", help='used for logging')
     parser.add_argument('--retrain', type=bool, default=False, help='flag to initiate training')
-    parser.add_argument('--horizons', type=int, nargs='*', default=[5, 10, 20, 50, 100], help='List of rollout horizons to test')
+    parser.add_argument('--horizons', type=int, nargs='*', default=[5, 15, 25, 50, 75, 100], help='List of rollout horizons to test')
 
     args = parser.parse_args()
 
@@ -771,7 +771,7 @@ def train_dynamics_model():
     mse_rollout_norm, mse_rollout_real = [], []
     for v in mse_dict.values():
         mse_rollout_norm.append(v[0].item())
-        mse_rollout_real.append(v[0].item())
+        mse_rollout_real.append(v[1].item())
 
     plt.figure(figsize=(8,5))
     plt.plot(args.horizons, mse_rollout_norm, marker="o", label="Scaled MSE")
