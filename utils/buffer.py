@@ -139,7 +139,7 @@ class OfflineDatasetLoader:
         dataset['observations'] = np.array(dataset['observations'])
         dataset['next_observations'] = np.array(dataset['next_observations'])
         dataset['terminals'] = np.array(dataset['terminals'])
-        dataset['rewards'] = np.array(dataset['rewards']) / max_reward  # normalizing reward
+        dataset['rewards'] = np.array(dataset['rewards']) #/ max_reward  # normalizing reward
         return dataset
 
 
@@ -183,7 +183,7 @@ class OfflineDatasetLoader:
         dataset['observations'] = np.array(dataset['observations'])
         dataset['next_observations'] = np.array(dataset['next_observations'])
         dataset['terminals'] = np.array(dataset['terminals'])
-        dataset['rewards'] = np.array(dataset['rewards']) / max_reward  # normalizing reward
+        dataset['rewards'] = np.array(dataset['rewards'])# / max_reward  # normalizing reward
         return dataset
 
 #code adopted from https://github.com/yihaosun1124/OfflineRL-Kit/blob/main/offlinerlkit/buffer/buffer.py
