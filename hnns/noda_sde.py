@@ -294,7 +294,7 @@ class NODA(nn.Module):
         return total_loss, loss_recon, loss_state, loss_reward
 
 class NODATrainer:
-    def __init__(self, model, data, batch_size, lr, dt, alpha, holdout_ratio=0.15, device='cpu'):
+    def __init__(self, model, data, batch_size, lr, dt, alpha, log_dirs, holdout_ratio=0.15, device='cpu'):
         self.model = model.to(device)
         self.data = data
         self.device = device
@@ -324,40 +324,43 @@ class NODATrainer:
         np.random.shuffle(indices)
         train_idx, holdout_idx = indices[:train_size], indices[train_size:]
 
+        # Save indices for reproducibility
+        np.save(os.path.join(log_dirs, "train_idx.npy"), train_idx)
+        np.save(os.path.join(log_dirs, "holdout_idx.npy"), holdout_idx)
+
         # Initialize scalers 
         # # StandardScaler for normalizing inputs
         self.obs_scaler = StandardScaler(name="obs") 
         self.act_scaler = StandardScaler(name="act") 
-        # Already applied Min-Max scaling on reward in buffer
-        # self.rew_scaler = StandardScaler() 
+        self.rew_scaler = StandardScaler(name="rew") 
 
         # Fit on train split 
         self.obs_scaler.fit(obss[train_idx]) 
         self.act_scaler.fit(actions[train_idx]) 
-        # self.rew_scaler.fit(rewards[train_idx]) 
+        self.rew_scaler.fit(rewards[train_idx]) 
 
         # Transform both train + holdout 
         obss = self.obs_scaler.transform(obss) 
         actions = self.act_scaler.transform(actions) 
         next_obss = self.obs_scaler.transform(next_obss) # same obs scaler 
-        # rewards = self.rew_scaler.transform(rewards)
+        rewards = self.rew_scaler.transform(rewards)
 
-        train_dataset = TensorDataset(
+        self.train_dataset = TensorDataset(
             torch.tensor(obss[train_idx], dtype=torch.float32),
             torch.tensor(actions[train_idx], dtype=torch.float32),
             torch.tensor(next_obss[train_idx], dtype=torch.float32),
             torch.tensor(rewards[train_idx], dtype=torch.float32),
         )
 
-        holdout_dataset = TensorDataset(
+        self.holdout_dataset = TensorDataset(
             torch.tensor(obss[holdout_idx], dtype=torch.float32),
             torch.tensor(actions[holdout_idx], dtype=torch.float32),
             torch.tensor(next_obss[holdout_idx], dtype=torch.float32),
             torch.tensor(rewards[holdout_idx], dtype=torch.float32),
         )
 
-        self.train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
-        self.holdout_loader = DataLoader(holdout_dataset, batch_size=64, shuffle=False)
+        self.train_loader = DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True)
+        self.holdout_loader = DataLoader(self.holdout_dataset, batch_size=64, shuffle=False)
 
     def train_one_epoch(self):
         self.model.train()
@@ -534,6 +537,7 @@ class NODATrainer:
         # self.act_scaler.save_scaler(save_path)
         self.obs_scaler.save_scaler_combined(save_path)
         self.act_scaler.save_scaler_combined(save_path)
+        self.rew_scaler.save_scaler_combined(save_path)
 
         # print(f"Checkpoint saved at epoch {epoch+1} with Val Loss {val_loss:.4f}")
 
@@ -550,6 +554,7 @@ class NODATrainer:
         # self.act_scaler.load_scaler(load_path)
         self.obs_scaler.load_scaler_combined(load_path)
         self.act_scaler.load_scaler_combined(load_path)
+        self.rew_scaler.load_scaler_combined(load_path)
 
     def evaluate_multistep_rollout(self, horizons=[5, 10, 20, 50], num_rollouts=100):
         """
@@ -655,10 +660,126 @@ class NODATrainer:
 
         return mse_dict
 
+    # def evaluate_multistep_rollout_with_variance(self, horizons=[5, 10, 20, 50], num_rollouts=100):
+    #     """
+    #     Evaluate multi-step rollout prediction error of the dynamics model.
+    #     Returns both mean and variance across multiple rollouts.
+
+    #     Args:
+    #         horizons: list of rollout horizons to test
+    #         num_rollouts: number of random rollouts sampled
+
+    #     Returns:
+    #         mse_dict: {horizon: {
+    #             "scaled_mean": ..., "scaled_std": ...,
+    #             #"real_mean": ..., "real_std": ...
+    #         }}
+    #     """
+    #     self.model.eval()
+
+    #     obss, actions, next_obss, rewards = self.model.format_samples_for_training(self.data)
+
+    #     data_size = obss.shape[0]
+
+    #     # Normalize with same scalers as training
+    #     obss = self.obs_scaler.transform(obss)
+    #     actions = self.act_scaler.transform(actions)
+    #     next_obss = self.obs_scaler.transform(next_obss)
+
+    #     obss = torch.tensor(obss, dtype=torch.float32).to(self.device)
+    #     actions = torch.tensor(actions, dtype=torch.float32).to(self.device)
+
+    #     mse_dict = {}
+
+    #     for horizon in horizons:
+    #         rollout_preds_all, rollout_truth_all = [], []
+
+    #         # collect rollouts
+    #         for _ in range(num_rollouts):
+    #             idx = torch.randint(0, data_size - horizon - 1, (1,)).item()
+
+    #             s_seq = obss[idx : idx + horizon + 1]
+    #             a_seq = actions[idx : idx + horizon]
+
+    #             rollout_truth = s_seq[1:]  # ground-truth rollout
+    #             s_pred = s_seq[0].unsqueeze(0)
+
+    #             rollout_pred = []
+    #             for t in range(horizon):
+    #                 s_pred, _ = self.model.predict_state_reward(
+    #                     s_pred, a_seq[t].unsqueeze(0), self.dt
+    #                 )
+    #                 rollout_pred.append(s_pred.squeeze(0))
+
+    #             rollout_preds_all.append(torch.stack(rollout_pred))
+    #             rollout_truth_all.append(rollout_truth)
+
+    #         # stack rollouts
+    #         rollout_preds_all = torch.stack(rollout_preds_all)   # [num_rollouts, horizon, state_dim]
+    #         rollout_truth_all = torch.stack(rollout_truth_all)
+
+    #         with torch.no_grad():
+    #             # Scaled space 
+    #             mse_scaled_per_rollout = F.mse_loss(
+    #                 rollout_preds_all, rollout_truth_all, reduction="none"
+    #             ).mean(dim=(1, 2))  # [num_rollouts]
+
+    #             scaled_mean = mse_scaled_per_rollout.mean().item()
+    #             scaled_std = mse_scaled_per_rollout.std().item()
+
+    #             # Real (inverse-transform) space 
+
+    #             # rollout_preds_real = self.obs_scaler.inverse_transform(
+    #             #     rollout_preds_all.cpu().numpy().reshape(-1, obss.shape[-1])
+    #             # )
+
+    #             # rollout_truth_real = self.obs_scaler.inverse_transform(
+    #             #     rollout_truth_all.cpu().numpy().reshape(-1, obss.shape[-1])
+    #             # )
+
+    #             rollout_preds_real = self.obs_scaler.inverse_transform(
+    #                 rollout_preds_all.cpu().numpy().reshape(-1, obss.shape[-1])
+    #             ).reshape(num_rollouts, horizon, -1)
+
+    #             rollout_truth_real = self.obs_scaler.inverse_transform(
+    #                 rollout_truth_all.cpu().numpy().reshape(-1, obss.shape[-1])
+    #             ).reshape(num_rollouts, horizon, -1)
+
+    #             rollout_preds_real = torch.tensor(rollout_preds_real, dtype=torch.float32)
+    #             rollout_truth_real = torch.tensor(rollout_truth_real, dtype=torch.float32)
+
+    #             # print(rollout_preds_real.shape, rollout_truth_real.shape)
+
+    #             self.plot_featurewise_rollout_errors(rollout_preds_real, rollout_truth_real, horizons)
+
+    #             # mse_real_per_rollout = F.mse_loss(
+    #             #     rollout_preds_real, rollout_truth_real, reduction="none"
+    #             # ).mean(dim=(1, 2))  # [num_rollouts]
+
+    #             # real_mean = mse_real_per_rollout.mean().item()
+    #             # real_std = mse_real_per_rollout.std().item()
+
+    #         mse_dict[horizon] = {
+    #             "scaled_mean": scaled_mean,
+    #             "scaled_std": scaled_std,
+    #             # "real_mean": real_mean,
+    #             # "real_std": real_std,
+    #         }
+
+    #         print(
+    #             f"H={horizon}: "
+    #             f"Scaled MSE={scaled_mean:.6f} ± {scaled_std:.6f}"
+    #             # f"Real MSE={real_mean:.6f} ± {real_std:.6f}"
+    #         )
+
+    #     return mse_dict
+
     def evaluate_multistep_rollout_with_variance(self, horizons=[5, 10, 20, 50], num_rollouts=100):
         """
         Evaluate multi-step rollout prediction error of the dynamics model.
         Returns both mean and variance across multiple rollouts.
+
+        ######## HOLDOUT DATASET USED ######## 
 
         Args:
             horizons: list of rollout horizons to test
@@ -667,22 +788,16 @@ class NODATrainer:
         Returns:
             mse_dict: {horizon: {
                 "scaled_mean": ..., "scaled_std": ...,
-                "real_mean": ..., "real_std": ...
+                #"real_mean": ..., "real_std": ...
             }}
         """
         self.model.eval()
 
-        obss, actions, next_obss, rewards = self.model.format_samples_for_training(self.data)
-
+        # Unpack tensors from self.holdout_dataset 
+        obss, actions, next_obss, rewards = [
+            tensor.clone().to(self.device) for tensor in self.holdout_dataset.tensors
+        ]
         data_size = obss.shape[0]
-
-        # Normalize with same scalers as training
-        obss = self.obs_scaler.transform(obss)
-        actions = self.act_scaler.transform(actions)
-        next_obss = self.obs_scaler.transform(next_obss)
-
-        obss = torch.tensor(obss, dtype=torch.float32).to(self.device)
-        actions = torch.tensor(actions, dtype=torch.float32).to(self.device)
 
         mse_dict = {}
 
@@ -714,7 +829,7 @@ class NODATrainer:
             rollout_truth_all = torch.stack(rollout_truth_all)
 
             with torch.no_grad():
-                # Scaled space 
+                # Scaled space
                 mse_scaled_per_rollout = F.mse_loss(
                     rollout_preds_all, rollout_truth_all, reduction="none"
                 ).mean(dim=(1, 2))  # [num_rollouts]
@@ -722,24 +837,20 @@ class NODATrainer:
                 scaled_mean = mse_scaled_per_rollout.mean().item()
                 scaled_std = mse_scaled_per_rollout.std().item()
 
-                # # Real (inverse-transform) space 
-                # rollout_preds_real = self.obs_scaler.inverse_transform(
-                #     rollout_preds_all.cpu().numpy().reshape(-1, obss.shape[-1])
-                # ).reshape(num_rollouts, horizon, -1)
+                # --- Real (inverse-transform) space ---
+                rollout_preds_real = self.obs_scaler.inverse_transform(
+                    rollout_preds_all.cpu().numpy().reshape(-1, obss.shape[-1])
+                ).reshape(num_rollouts, horizon, -1)
 
-                # rollout_truth_real = self.obs_scaler.inverse_transform(
-                #     rollout_truth_all.cpu().numpy().reshape(-1, obss.shape[-1])
-                # ).reshape(num_rollouts, horizon, -1)
+                rollout_truth_real = self.obs_scaler.inverse_transform(
+                    rollout_truth_all.cpu().numpy().reshape(-1, obss.shape[-1])
+                ).reshape(num_rollouts, horizon, -1)
 
-                # rollout_preds_real = torch.tensor(rollout_preds_real, dtype=torch.float32)
-                # rollout_truth_real = torch.tensor(rollout_truth_real, dtype=torch.float32)
+                rollout_preds_real = torch.tensor(rollout_preds_real, dtype=torch.float32)
+                rollout_truth_real = torch.tensor(rollout_truth_real, dtype=torch.float32)
 
-                # mse_real_per_rollout = F.mse_loss(
-                #     rollout_preds_real, rollout_truth_real, reduction="none"
-                # ).mean(dim=(1, 2))  # [num_rollouts]
-
-                # real_mean = mse_real_per_rollout.mean().item()
-                # real_std = mse_real_per_rollout.std().item()
+                # Optional: plot featurewise errors
+                self.plot_featurewise_rollout_errors(rollout_preds_real, rollout_truth_real, horizons)
 
             mse_dict[horizon] = {
                 "scaled_mean": scaled_mean,
@@ -750,11 +861,113 @@ class NODATrainer:
 
             print(
                 f"H={horizon}: "
-                f"Scaled MSE={scaled_mean:.6f} ± {scaled_std:.6f}, "
+                f"Scaled MSE={scaled_mean:.6f} ± {scaled_std:.6f}"
                 # f"Real MSE={real_mean:.6f} ± {real_std:.6f}"
             )
 
         return mse_dict
+
+
+    def plot_featurewise_rollout_errors(self, preds, truth, horizons):
+        """
+        Plot per-feature rollout prediction errors with variance bands.
+
+        Args:
+            preds: torch.Tensor, shape [num_rollouts, horizon, state_dim] predicted rollout
+            truth: torch.Tensor, shape [num_rollouts, horizon, state_dim] ground-truth rollout
+            feature_slices: dict, {feature_name: slice(indices)} mapping feature names to index ranges
+            horizons: int, horizon length used in rollouts
+            num_rollouts: int, number of rollouts
+        """
+        feature_slices = {
+            "gravity_vector": slice(0, 3),
+            "x_vel": slice(3, 4),
+            "y_vel": slice(4, 5),
+            "yaw_vel": slice(5, 6),
+            "body_height": slice(6, 7),
+            "step_freq": slice(7, 8),
+            "gait": slice(8, 11),
+            "durations": slice(11, 12),
+            "footswing_height": slice(12, 13),
+            "body_pitch": slice(13, 14),
+            "body_roll": slice(14, 15),
+            "stance_width": slice(15, 16),
+            "stance_length": slice(16, 17),
+            "aux_reward": slice(17, 18),
+            "dof_pos": slice(18, 30),
+            "dof_vel": slice(30, 42),
+            "actions": slice(42, 54),
+            "clock_inputs": slice(54, 58),
+        }
+
+        # Compute squared errors per-dim
+        errors = (preds - truth).pow(2)   # [N, H, D]
+        N, H, D = errors.shape
+
+        # Horizon axis
+        horizon_len = errors.shape[1]
+        horizon_axis = np.arange(1, horizon_len + 1)
+
+
+        ################### 1. Feature-wise error plots ###################
+        n_features = len(feature_slices)
+        ncols = 3
+        nrows = (n_features + ncols - 1) // ncols  # ceil division
+
+        fig, axes = plt.subplots(nrows, ncols, figsize=(14, 3*nrows), sharex=True)
+        axes = axes.ravel()  # flatten so we can index like 1D
+        
+        feature_stats = {}
+
+        for ax, (feat, sl) in zip(axes, feature_slices.items()):
+            # Select dims corresponding to this feature
+            feat_err = errors[:, :, sl]   # [N, H, dim_of_feature]
+            feat_err = feat_err.mean(-1)  # avg over dims → [N, H]
+
+            # Mean & std across rollouts
+            mean_curve = feat_err.mean(0).cpu().numpy()
+            std_curve = feat_err.std(0).cpu().numpy()
+
+            feature_stats[feat] = (mean_curve, std_curve)
+
+            # Plot
+            ax.plot(horizon_axis, mean_curve, label=f"{feat} error")
+            ax.fill_between(horizon_axis, mean_curve - std_curve, mean_curve + std_curve,
+                            alpha=0.3)
+            ax.set_title(feat, pad=-10)
+            ax.set_ylabel("MSE")
+            ax.grid(True)
+
+        # Hide any unused subplots if features < nrows*ncols
+        for i in range(len(feature_slices), len(axes)):
+            fig.delaxes(axes[i])
+
+        axes[-1].set_xlabel("Horizon")
+        plt.tight_layout()
+        plt.show()
+
+        ################### 2. Global average error curve ###################
+        mean_global = errors.mean((0, 2)).cpu().numpy()  # avg over rollouts+features -> [H]
+        std_global  = errors.mean(2).std(0).cpu().numpy()  # std across rollouts, averaged over features
+
+        plt.figure(figsize=(7,5))
+        plt.plot(horizon_axis, mean_global, label="Global Mean MSE", color="blue")
+        plt.fill_between(horizon_axis, mean_global-std_global, mean_global+std_global,
+                         alpha=0.3, color="blue")
+        plt.title("Global Rollout Error Curve")
+        plt.xlabel("Horizon")
+        plt.ylabel("Mean Squared Error")
+        plt.grid(True)
+        plt.legend()
+        plt.show()
+
+        ################### 3. Report error at selected horizons ###################
+        print("Summary at selected horizons:")
+        for h in horizons:
+            if h <= H:
+                print(f"H={h}: Mean MSE={mean_global[h-1]:.6f} ± {std_global[h-1]:.6f}")
+
+        return feature_stats, (mean_global, std_global)
 
     def plot_rollout_mse_with_variance(self, horizons, scaled_stats, num_rollouts=100):
         mse_scaled_means, mse_scaled_stds = scaled_stats
@@ -804,8 +1017,8 @@ def train_dynamics_model():
     parser.add_argument("--preprocess", type=bool, default=True)
     # parser.add_argument('--run_name', type=str, default=f"NODA_{datetime.now().strftime('%Y%m%d_%H%M%S')}", help='used for logging to distingush different runs')
     parser.add_argument('--run_name', type=str, default=f"NODA", help='used for logging')
-    parser.add_argument('--retrain', type=bool, default=False, help='flag to initiate training')
-    parser.add_argument('--horizons', type=int, nargs='*', default=[5, 15, 25, 50, 75, 100], help='List of rollout horizons to test')
+    parser.add_argument('--retrain', type=bool, default=True, help='flag to initiate training')
+    parser.add_argument('--horizons', type=int, nargs='*', default=[20], help='List of rollout horizons to test')
 
     args = parser.parse_args()
 
@@ -864,7 +1077,7 @@ def train_dynamics_model():
         # Generate dynamic log directory using timestamp
         # tensorboard_log_dir = os.path.join("runs", f"DYN_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
         # Logger
-        log_dirs = make_log_dirs(args.task, 'dynamics', args.seed, vars(args), run_name=args.run_name)
+        log_dirs = make_log_dirs(args.task, 'dynamics_new', args.seed, vars(args), run_name=args.run_name)
         print(f"log_dirs = {log_dirs}")
         tensorboard_writer = SummaryWriter(log_dir=os.path.join(log_dirs, "tensorboard"))
 
@@ -873,7 +1086,8 @@ def train_dynamics_model():
                           batch_size=args.batch_size, 
                           lr=args.lr, 
                           dt=args.dt, 
-                          alpha=args.alpha, 
+                          alpha=args.alpha,
+                          log_dirs=log_dirs, 
                           device=args.device)
 
     if os.path.isfile(os.path.join(log_dirs, "best_model.pth")) and args.retrain == False:
@@ -882,6 +1096,7 @@ def train_dynamics_model():
         noda_trainer.load(log_dirs)
         print("Load successful!!")
     else:
+        print("Starting training from scratch...")
         if use_wandb:
             noda_trainer.train(
                             num_epochs=args.num_epochs, 
