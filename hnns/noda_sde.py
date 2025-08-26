@@ -849,7 +849,10 @@ class NODATrainer:
                 rollout_preds_real = torch.tensor(rollout_preds_real, dtype=torch.float32)
                 rollout_truth_real = torch.tensor(rollout_truth_real, dtype=torch.float32)
 
-                # Optional: plot featurewise errors
+                ###############
+                self.plot_global_rollout_error_curve(rollout_preds_all, rollout_truth_all, horizons)
+
+                # plot featurewise errors
                 self.plot_featurewise_rollout_errors(rollout_preds_real, rollout_truth_real, horizons)
 
             mse_dict[horizon] = {
@@ -946,7 +949,15 @@ class NODATrainer:
         plt.tight_layout()
         plt.show()
 
-        ################### 2. Global average error curve ###################
+    def plot_global_rollout_error_curve(self, preds, truth, horizons):
+        # Compute squared errors per-dim
+        errors = (preds - truth).pow(2)   # [N, H, D]
+        N, H, D = errors.shape
+
+        # Horizon axis
+        horizon_len = errors.shape[1]
+        horizon_axis = np.arange(1, horizon_len + 1)
+
         mean_global = errors.mean((0, 2)).cpu().numpy()  # avg over rollouts+features -> [H]
         std_global  = errors.mean(2).std(0).cpu().numpy()  # std across rollouts, averaged over features
 
@@ -961,13 +972,10 @@ class NODATrainer:
         plt.legend()
         plt.show()
 
-        ################### 3. Report error at selected horizons ###################
         print("Summary at selected horizons:")
         for h in horizons:
             if h <= H:
                 print(f"H={h}: Mean MSE={mean_global[h-1]:.6f} ± {std_global[h-1]:.6f}")
-
-        return feature_stats, (mean_global, std_global)
 
     def plot_rollout_mse_with_variance(self, horizons, scaled_stats, num_rollouts=100):
         mse_scaled_means, mse_scaled_stds = scaled_stats
@@ -1017,7 +1025,7 @@ def train_dynamics_model():
     parser.add_argument("--preprocess", type=bool, default=True)
     # parser.add_argument('--run_name', type=str, default=f"NODA_{datetime.now().strftime('%Y%m%d_%H%M%S')}", help='used for logging to distingush different runs')
     parser.add_argument('--run_name', type=str, default=f"NODA", help='used for logging')
-    parser.add_argument('--retrain', type=bool, default=True, help='flag to initiate training')
+    parser.add_argument('--retrain', type=bool, default=False, help='flag to initiate training')
     parser.add_argument('--horizons', type=int, nargs='*', default=[20], help='List of rollout horizons to test')
 
     args = parser.parse_args()
