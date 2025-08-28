@@ -39,16 +39,36 @@ class AutoEncoder(nn.Module):
         self.latent_dim = latent_dim
 
         # Encoder: state -> [q, p]
+        # self.encoder = nn.Sequential(
+        #     nn.Linear(input_dim, 512),
+        #     nn.ReLU(),
+        #     nn.Linear(512, latent_dim)
+        # )
+
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, 512),
             nn.ReLU(),
+
+            nn.Linear(512, 512),
+            nn.ReLU(),
+
             nn.Linear(512, latent_dim)
         )
 
         # Decoder: [q, p] -> state
+        # self.decoder = nn.Sequential(
+        #     nn.Linear(latent_dim, 512),
+        #     nn.ReLU(),
+        #     nn.Linear(512, input_dim)
+        # )
+
         self.decoder = nn.Sequential(
             nn.Linear(latent_dim, 512),
             nn.ReLU(),
+
+            nn.Linear(512, 512),
+            nn.ReLU(),
+
             nn.Linear(512, input_dim)
         )
 
