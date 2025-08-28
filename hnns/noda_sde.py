@@ -256,18 +256,46 @@ class NODA(nn.Module):
     #     total_loss = alpha * (loss_recon + loss_state) + (1 - alpha) * loss_reward
     #     return total_loss, loss_recon, loss_state, loss_reward
 
-    def compute_loss(self, s_t, a_t, s_tp1_true, r_true, dt, alpha, num_rollouts=5):
-        """Compute the training loss for the stochastic Hamiltonian SDE dynamics model.
+    # def compute_loss(self, s_t, a_t, s_tp1_true, r_true, dt, alpha, num_rollouts=5):
+    #     """Compute the training loss for the stochastic Hamiltonian SDE dynamics model.
 
-        This method evaluates how well the model predicts the next state and reward
-        given the current state and action, while accounting for the stochasticity
-        in the dynamics. To reduce the variance introduced by random Brownian noise,
-        it performs multiple stochastic rollouts and averages the predictions.
-        """
-        rollout_preds = []
-        reward_preds = []
+    #     This method evaluates how well the model predicts the next state and reward
+    #     given the current state and action, while accounting for the stochasticity
+    #     in the dynamics. To reduce the variance introduced by random Brownian noise,
+    #     it performs multiple stochastic rollouts and averages the predictions.
+    #     """
+    #     rollout_preds = []
+    #     reward_preds = []
 
-        # Multi-rollout averaging
+    #     # Multi-rollout averaging
+    #     for _ in range(num_rollouts):
+    #         s_pred, r_pred = self.predict_state_reward(s_t, a_t, dt)
+    #         rollout_preds.append(s_pred)
+    #         reward_preds.append(r_pred)
+
+    #     s_pred_mean = torch.stack(rollout_preds, dim=0).mean(dim=0)
+    #     r_pred_mean = torch.stack(reward_preds, dim=0).mean(dim=0)
+
+    #     # Canonical latent encoding
+    #     _, _, u = self.autoencoder.encode(s_t)
+    #     # Reconstruction from latent canonical encoding
+    #     s_recon = self.autoencoder.decode(u)
+
+    #     # State reconstruction loss (from autoencoder)
+    #     loss_recon = F.mse_loss(s_recon, s_t)
+    #     # Next-state prediction loss
+    #     loss_state = F.mse_loss(s_pred_mean, s_tp1_true)
+    #     # Reward prediction loss
+    #     loss_reward = F.mse_loss(r_pred_mean, r_true)
+
+    #     # Combined training loss
+    #     # As a convex combination of the state loss and the reward loss
+    #     total_loss = alpha * (loss_recon + loss_state) + (1 - alpha) * loss_reward
+    #     return total_loss, loss_recon, loss_state, loss_reward
+
+    def compute_loss(self, s_t, a_t, s_tp1_true, r_true, dt, alpha, num_rollouts=5, weights=None):
+        rollout_preds, reward_preds = [], []
+
         for _ in range(num_rollouts):
             s_pred, r_pred = self.predict_state_reward(s_t, a_t, dt)
             rollout_preds.append(s_pred)
@@ -276,22 +304,24 @@ class NODA(nn.Module):
         s_pred_mean = torch.stack(rollout_preds, dim=0).mean(dim=0)
         r_pred_mean = torch.stack(reward_preds, dim=0).mean(dim=0)
 
-        # Canonical latent encoding
         _, _, u = self.autoencoder.encode(s_t)
-        # Reconstruction from latent canonical encoding
         s_recon = self.autoencoder.decode(u)
 
-        # State reconstruction loss (from autoencoder)
         loss_recon = F.mse_loss(s_recon, s_t)
-        # Next-state prediction loss
-        loss_state = F.mse_loss(s_pred_mean, s_tp1_true)
-        # Reward prediction loss
+
+        # Weighted state loss 
+        if weights is not None:
+            errors = (s_pred_mean - s_tp1_true) ** 2
+            weighted_errors = errors * weights
+            loss_state = weighted_errors.mean()
+        else:
+            loss_state = F.mse_loss(s_pred_mean, s_tp1_true)
+
         loss_reward = F.mse_loss(r_pred_mean, r_true)
 
-        # Combined training loss
-        # As a convex combination of the state loss and the reward loss
         total_loss = alpha * (loss_recon + loss_state) + (1 - alpha) * loss_reward
         return total_loss, loss_recon, loss_state, loss_reward
+
 
 class NODATrainer:
     def __init__(self, model, data, batch_size, lr, dt, alpha, log_dirs, holdout_ratio=0.15, device='cpu'):
@@ -362,7 +392,7 @@ class NODATrainer:
         self.train_loader = DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True)
         self.holdout_loader = DataLoader(self.holdout_dataset, batch_size=64, shuffle=False)
 
-    def train_one_epoch(self):
+    def train_one_epoch(self, weights):
         self.model.train()
         total_loss, total_recon_loss, total_state_loss, total_reward_loss = 0, 0, 0, 0
 
@@ -377,7 +407,7 @@ class NODATrainer:
 
             # Forward pass: compute the total loss (state + reward prediction loss)
             loss, loss_recon, loss_state, loss_reward = self.model.compute_loss(
-                obss, actions, next_obss, rewards, self.dt, self.alpha
+                obss, actions, next_obss, rewards, self.dt, self.alpha, weights=weights
             )
             
             # Backpropagation and optimization
@@ -457,6 +487,7 @@ class NODATrainer:
         return mean_loss, mean_recon, mean_state, mean_reward
 
     def train(self, 
+            weights = None,
             num_epochs=1000, 
             wandb = None, 
             tensorboard_writer = None, 
@@ -468,7 +499,7 @@ class NODATrainer:
         best_holdout_loss = float('inf')
         patience_counter = 0
         for epoch in range(num_epochs):
-            train_loss, train_recon, train_state, train_reward = self.train_one_epoch()
+            train_loss, train_recon, train_state, train_reward = self.train_one_epoch(weights)
             val_loss, val_recon, val_state, val_reward = self.evaluate_holdout()
 
             # Logging
@@ -837,7 +868,7 @@ class NODATrainer:
                 scaled_mean = mse_scaled_per_rollout.mean().item()
                 scaled_std = mse_scaled_per_rollout.std().item()
 
-                # --- Real (inverse-transform) space ---
+                # Real (inverse-transform) space
                 rollout_preds_real = self.obs_scaler.inverse_transform(
                     rollout_preds_all.cpu().numpy().reshape(-1, obss.shape[-1])
                 ).reshape(num_rollouts, horizon, -1)
@@ -1026,7 +1057,7 @@ def train_dynamics_model():
     # parser.add_argument('--run_name', type=str, default=f"NODA_{datetime.now().strftime('%Y%m%d_%H%M%S')}", help='used for logging to distingush different runs')
     parser.add_argument('--run_name', type=str, default=f"NODA", help='used for logging')
     parser.add_argument('--retrain', type=bool, default=False, help='flag to initiate training')
-    parser.add_argument('--horizons', type=int, nargs='*', default=[20], help='List of rollout horizons to test')
+    parser.add_argument('--horizons', type=int, nargs='*', default=[30], help='List of rollout horizons to test')
 
     args = parser.parse_args()
 
@@ -1085,7 +1116,7 @@ def train_dynamics_model():
         # Generate dynamic log directory using timestamp
         # tensorboard_log_dir = os.path.join("runs", f"DYN_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
         # Logger
-        log_dirs = make_log_dirs(args.task, 'dynamics_new', args.seed, vars(args), run_name=args.run_name)
+        log_dirs = make_log_dirs(args.task, 'dynamics', args.seed, vars(args), run_name=args.run_name)
         print(f"log_dirs = {log_dirs}")
         tensorboard_writer = SummaryWriter(log_dir=os.path.join(log_dirs, "tensorboard"))
 
@@ -1105,13 +1136,26 @@ def train_dynamics_model():
         print("Load successful!!")
     else:
         print("Starting training from scratch...")
+        weights = torch.ones(args.input_dim, device=args.device)
+        # weights[3] = 2.0   # x_vel (index 3)
+        # weights[4] = 2.0   # y_vel (index 4)
+        # weights[42:54] = 1.5  # actions (indices 42–54)
+
+        weights[3] = 2   # x_vel (index 3)
+        weights[4] = 2   # y_vel (index 4)
+        weights[42:54] = 1.5  # actions (indices 42–54)
+
+        # Normalize to keep loss scale stable
+        weights = weights / weights.mean()
         if use_wandb:
             noda_trainer.train(
+                            weights=weights,
                             num_epochs=args.num_epochs, 
                             wandb=wandb, 
                             save_path=log_dirs)
         else:
             noda_trainer.train(
+                            weights=weights,
                             num_epochs=args.num_epochs, 
                             tensorboard_writer=tensorboard_writer,
                             save_path=log_dirs)
