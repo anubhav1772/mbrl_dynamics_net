@@ -344,7 +344,7 @@ class NODA(nn.Module):
 
 
 class NODATrainer:
-    def __init__(self, model, data, batch_size, lr, dt, alpha, log_dirs, holdout_ratio=0.15, device='cpu'):
+    def __init__(self, model, data, batch_size, lr, dt, alpha, log_dirs, holdout_ratio=0.15, retrain=False, device='cpu'):
         self.model = model.to(device)
         self.data = data
         self.device = device
@@ -365,35 +365,45 @@ class NODATrainer:
         holdout_size = min(int(data_size * holdout_ratio), 1000)
         train_size = data_size - holdout_size
 
-        # train_dataset, holdout_dataset = random_split(self.dataset, [train_size, holdout_size])
-        # Seed for reproducibility
-        # g = torch.Generator().manual_seed(42)
-        # train_dataset, holdout_dataset = random_split(self.dataset, [train_size, holdout_size], generator=g)
-
-        indices = np.arange(data_size)
-        np.random.shuffle(indices)
-        train_idx, holdout_idx = indices[:train_size], indices[train_size:]
-
-        # Save indices for reproducibility
-        np.save(os.path.join(log_dirs, "train_idx.npy"), train_idx)
-        np.save(os.path.join(log_dirs, "holdout_idx.npy"), holdout_idx)
-
         # Initialize scalers 
         # # StandardScaler for normalizing inputs
         self.obs_scaler = StandardScaler(name="obs") 
         self.act_scaler = StandardScaler(name="act") 
         self.rew_scaler = StandardScaler(name="rew") 
 
-        # Fit on train split 
-        self.obs_scaler.fit(obss[train_idx]) 
-        self.act_scaler.fit(actions[train_idx]) 
-        self.rew_scaler.fit(rewards[train_idx]) 
+        if retrain == True:
+            # train_dataset, holdout_dataset = random_split(self.dataset, [train_size, holdout_size])
+            # Seed for reproducibility
+            # g = torch.Generator().manual_seed(42)
+            # train_dataset, holdout_dataset = random_split(self.dataset, [train_size, holdout_size], generator=g)
 
-        # Transform both train + holdout 
-        obss = self.obs_scaler.transform(obss) 
-        actions = self.act_scaler.transform(actions) 
-        next_obss = self.obs_scaler.transform(next_obss) # same obs scaler 
-        rewards = self.rew_scaler.transform(rewards)
+            indices = np.arange(data_size)
+            np.random.shuffle(indices)
+            train_idx, holdout_idx = indices[:train_size], indices[train_size:]
+
+            # Save indices for reproducibility
+            np.save(os.path.join(log_dirs, "train_idx.npy"), train_idx)
+            np.save(os.path.join(log_dirs, "holdout_idx.npy"), holdout_idx)
+
+            # # Fit scalers on train split only
+            self.obs_scaler.fit(obss[train_idx]) 
+            self.act_scaler.fit(actions[train_idx]) 
+            self.rew_scaler.fit(rewards[train_idx]) 
+
+            # Transform all data with fitted scalers
+            # Both train + holdout 
+            obss = self.obs_scaler.transform(obss) 
+            actions = self.act_scaler.transform(actions) 
+            next_obss = self.obs_scaler.transform(next_obss) # same obs scaler 
+            rewards = self.rew_scaler.transform(rewards)
+
+        else:
+            train_idx, holdout_idx = self.load(log_dirs)
+
+            obss = self.obs_scaler.transform(obss) 
+            actions = self.act_scaler.transform(actions) 
+            next_obss = self.obs_scaler.transform(next_obss) # same obs scaler 
+            rewards = self.rew_scaler.transform(rewards)
 
         self.train_dataset = TensorDataset(
             torch.tensor(obss[train_idx], dtype=torch.float32),
@@ -401,7 +411,7 @@ class NODATrainer:
             torch.tensor(next_obss[train_idx], dtype=torch.float32),
             torch.tensor(rewards[train_idx], dtype=torch.float32),
         )
-
+            
         self.holdout_dataset = TensorDataset(
             torch.tensor(obss[holdout_idx], dtype=torch.float32),
             torch.tensor(actions[holdout_idx], dtype=torch.float32),
@@ -606,6 +616,12 @@ class NODATrainer:
         self.obs_scaler.load_scaler_combined(load_path)
         self.act_scaler.load_scaler_combined(load_path)
         self.rew_scaler.load_scaler_combined(load_path)
+
+        # Load saved indices
+        train_idx = np.load(os.path.join(load_path, "train_idx.npy"))
+        holdout_idx = np.load(os.path.join(load_path, "holdout_idx.npy"))
+
+        return train_idx, holdout_idx
 
     def evaluate_multistep_rollout(self, horizons=[5, 10, 20, 50], num_rollouts=100):
         """
@@ -909,14 +925,11 @@ class NODATrainer:
             mse_dict[horizon] = {
                 "scaled_mean": scaled_mean,
                 "scaled_std": scaled_std,
-                # "real_mean": real_mean,
-                # "real_std": real_std,
             }
 
             print(
                 f"H={horizon}: "
                 f"Scaled MSE={scaled_mean:.6f} ± {scaled_std:.6f}"
-                # f"Real MSE={real_mean:.6f} ± {real_std:.6f}"
             )
 
         return mse_dict
@@ -1077,7 +1090,7 @@ def train_dynamics_model():
     # parser.add_argument('--run_name', type=str, default=f"NODA_{datetime.now().strftime('%Y%m%d_%H%M%S')}", help='used for logging to distingush different runs')
     parser.add_argument('--run_name', type=str, default=f"NODA", help='used for logging')
     parser.add_argument('--retrain', type=bool, default=False, help='flag to initiate training')
-    parser.add_argument('--horizons', type=int, nargs='*', default=[30], help='List of rollout horizons to test')
+    parser.add_argument('--horizons', type=int, nargs='*', default=[20], help='List of rollout horizons to test')
 
     args = parser.parse_args()
 
@@ -1147,15 +1160,11 @@ def train_dynamics_model():
                           dt=args.dt, 
                           alpha=args.alpha,
                           log_dirs=log_dirs, 
-                          device=args.device)
+                          retrain=args.retrain,
+                          device=args.device)        
 
-    if os.path.isfile(os.path.join(log_dirs, "best_model.pth")) and args.retrain == False:
-        print(f"Trained dynamics exists at {log_dirs}, loading...")
-        # dynamics
-        noda_trainer.load(log_dirs)
-        print("Load successful!!")
-    else:
-        print("Starting training from scratch...")
+    if args.retrain or not os.path.isfile(os.path.join(log_dirs, "best_model.pth")):
+        print("Training from scratch...")
         weights = torch.ones(args.input_dim, device=args.device)
         # weights[3] = 2.0   # x_vel (index 3)
         # weights[4] = 2.0   # y_vel (index 4)
@@ -1182,6 +1191,10 @@ def train_dynamics_model():
             # Ensures all logs are written
             tensorboard_writer.flush()   
             tensorboard_writer.close()
+    else:
+        print("Using pretrained dynamics...")
+        # noda_trainer.load(log_dirs)
+
 
     # mse_dict = noda_trainer.evaluate_multistep_rollout(horizons=args.horizons, num_rollouts=50)
     
@@ -1202,16 +1215,14 @@ def train_dynamics_model():
 
     # plt.show()
 
+    ###########################
     mse_dict = noda_trainer.evaluate_multistep_rollout_with_variance(horizons=args.horizons, num_rollouts=100)
 
     mse_scaled_means, mse_scaled_stds = [], []
-    # mse_real_means, mse_real_stds = [], []
 
     for horizon in args.horizons:
         mse_scaled_means.append(mse_dict[horizon]["scaled_mean"])
         mse_scaled_stds.append(mse_dict[horizon]["scaled_std"])
-        # mse_real_means.append(mse_dict[horizon]["real_mean"])
-        # mse_real_stds.append(mse_dict[horizon]["real_std"])
 
     scaled_stats = (mse_scaled_means, mse_scaled_stds)
 
