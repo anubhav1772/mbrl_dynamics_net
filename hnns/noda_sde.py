@@ -185,8 +185,17 @@ class ActionSDE(SDEStratonovich):
 class RewardDecoder(nn.Module):
     def __init__(self, latent_dim, action_dim) -> None:
         super().__init__()
+        
+        # self.reward_net = nn.Sequential(
+        #     nn.Linear(latent_dim + action_dim, 128),
+        #     nn.ReLU(),
+        #     nn.Linear(128, 1)
+        # )
+        
         self.reward_net = nn.Sequential(
             nn.Linear(latent_dim + action_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
             nn.ReLU(),
             nn.Linear(128, 1)
         )
@@ -282,6 +291,7 @@ class NODA(nn.Module):
 
         loss_reward = F.mse_loss(r_pred_mean, r_true)
 
+        # Composite loss function that mixes multiple MSE objectives (a/c to alpha)
         total_loss = alpha * (loss_recon + loss_state) + (1 - alpha) * loss_reward
         return total_loss, loss_recon, loss_state, loss_reward
 
