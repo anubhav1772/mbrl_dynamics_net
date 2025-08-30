@@ -98,22 +98,22 @@ class HamiltonianSDE(SDEStratonovich):
         assert latent_dim % 2 == 0, "latent_dim must be even"
         self.K = latent_dim // 2
 
-        # Drift network 
-        self.drift = nn.Sequential(
+        # Neural network representing the Hamiltonian H(q, p)
+        self.hamiltonian_net = nn.Sequential(
             nn.Linear(latent_dim, 128),
             nn.Tanh(),
-            nn.Linear(128, 1)  # scalar output
+            nn.Linear(128, 1)   # scalar Hamiltonian
         )
 
-        # Diffusion network
-        self.diffusion = nn.Sequential(
+        # Neural network for diffusion term g(u, a)
+        self.diffusion_net = nn.Sequential(
             nn.Linear(latent_dim + action_dim, 64),
             nn.ReLU(),
             nn.Linear(64, latent_dim)  # diagonal noise
         )
 
-        # External force model Q(a)
-        self.force = nn.Sequential(
+        # Neural network for external forces Q(a)
+        self.force_net = nn.Sequential(
             nn.Linear(action_dim, 64),
             nn.ReLU(),
             nn.Linear(64, 64),
@@ -121,7 +121,7 @@ class HamiltonianSDE(SDEStratonovich):
             nn.Linear(64, self.K)  # K = DoF
         )
 
-    def f(self, t, u, a=None):
+    def hamiltonian_drift(self, t, u, a=None):
         if a is None:
             a = torch.zeros(u.shape[0], self.action_dim, device=u.device)
         
@@ -134,7 +134,7 @@ class HamiltonianSDE(SDEStratonovich):
         # Compute Hamiltonian input
         H_in = torch.cat([q, p], dim=-1)  # H_in: (64, 24)
 
-        H_scalar = self.drift(H_in)
+        H_scalar = self.hamiltonian_net(H_in)
         grads = torch.autograd.grad(
             outputs=H_scalar,
             inputs=(q, p),
@@ -145,16 +145,16 @@ class HamiltonianSDE(SDEStratonovich):
 
         # Extract gradients for each sample in the batch
         dq_dt = grads[1]
-        dp_dt = -grads[0] + self.force(a)
+        dp_dt = -grads[0] + self.force_net(a)
 
         du_dt = torch.cat([dq_dt, dp_dt], dim=-1)
 
         return du_dt
 
-    def g(self, t, u, a=None):
+    def stochastic_diffusion(self, t, u, a=None):
         if a is None:
             a = torch.zeros(u.shape[0], self.action_dim, device=u.device)
-        return self.diffusion(torch.cat([u, a], dim=-1))
+        return self.diffusion_net(torch.cat([u, a], dim=-1))
 
 class ActionSDE(SDEStratonovich):
     """Wrapper for an SDE model that injects a fixed action vector into both the drift (f) 
@@ -177,15 +177,15 @@ class ActionSDE(SDEStratonovich):
         self.a_t = a_t
     
     def f(self, t, u):
-        return self.base_sde.f(t, u, self.a_t)
+        return self.base_sde.hamiltonian_drift(t, u, self.a_t)
     
     def g(self, t, u):
-        return self.base_sde.g(t, u, self.a_t)
+        return self.base_sde.stochastic_diffusion(t, u, self.a_t)
 
 class RewardDecoder(nn.Module):
     def __init__(self, latent_dim, action_dim) -> None:
         super().__init__()
-        self.net = nn.Sequential(
+        self.reward_net = nn.Sequential(
             nn.Linear(latent_dim + action_dim, 128),
             nn.ReLU(),
             nn.Linear(128, 1)
@@ -193,7 +193,7 @@ class RewardDecoder(nn.Module):
 
     def forward(self, q, p, a):
         u = torch.cat([q, p], dim=-1)
-        return self.net(torch.cat([u, a], dim=-1))  # shape: [B, 1]
+        return self.reward_net(torch.cat([u, a], dim=-1))  # shape: [B, 1]
 
 class NODA(nn.Module):
     def __init__(self, input_dim, latent_dim, action_dim, device='cpu') -> None:
@@ -255,65 +255,7 @@ class NODA(nn.Module):
         s_t_plus1_pred = self.autoencoder.decode(u_next)
         return s_t_plus1_pred, r_pred
 
-    # def compute_loss(self, s_t, a_t, s_tp1_true, r_true, dt, alpha):
-    #     '''One-step prediction loss (MSE for state + reward)
-    #     '''
-    #     s_pred, r_pred = self.predict_state_reward(s_t, a_t, dt)
-    #     # Canonical latent encoding
-    #     _, _, u = self.autoencoder.encode(s_t)
-    #     # Reconstruction from latent canonical encoding
-    #     s_recon = self.autoencoder.decode(u)
-
-    #     # Reconstruction loss
-    #     loss_recon = F.mse_loss(s_recon, s_t)          
-    #     # Next-state prediction loss
-    #     loss_state = F.mse_loss(s_pred, s_tp1_true)
-    #     # Reward prediction loss
-    #     loss_reward = F.mse_loss(r_pred, r_true)
-
-    #     # Combined training loss
-    #     # As a convex combination of the state loss and the reward loss
-    #     total_loss = alpha * (loss_recon + loss_state) + (1 - alpha) * loss_reward
-    #     return total_loss, loss_recon, loss_state, loss_reward
-
-    # def compute_loss(self, s_t, a_t, s_tp1_true, r_true, dt, alpha, num_rollouts=5):
-    #     """Compute the training loss for the stochastic Hamiltonian SDE dynamics model.
-
-    #     This method evaluates how well the model predicts the next state and reward
-    #     given the current state and action, while accounting for the stochasticity
-    #     in the dynamics. To reduce the variance introduced by random Brownian noise,
-    #     it performs multiple stochastic rollouts and averages the predictions.
-    #     """
-    #     rollout_preds = []
-    #     reward_preds = []
-
-    #     # Multi-rollout averaging
-    #     for _ in range(num_rollouts):
-    #         s_pred, r_pred = self.predict_state_reward(s_t, a_t, dt)
-    #         rollout_preds.append(s_pred)
-    #         reward_preds.append(r_pred)
-
-    #     s_pred_mean = torch.stack(rollout_preds, dim=0).mean(dim=0)
-    #     r_pred_mean = torch.stack(reward_preds, dim=0).mean(dim=0)
-
-    #     # Canonical latent encoding
-    #     _, _, u = self.autoencoder.encode(s_t)
-    #     # Reconstruction from latent canonical encoding
-    #     s_recon = self.autoencoder.decode(u)
-
-    #     # State reconstruction loss (from autoencoder)
-    #     loss_recon = F.mse_loss(s_recon, s_t)
-    #     # Next-state prediction loss
-    #     loss_state = F.mse_loss(s_pred_mean, s_tp1_true)
-    #     # Reward prediction loss
-    #     loss_reward = F.mse_loss(r_pred_mean, r_true)
-
-    #     # Combined training loss
-    #     # As a convex combination of the state loss and the reward loss
-    #     total_loss = alpha * (loss_recon + loss_state) + (1 - alpha) * loss_reward
-    #     return total_loss, loss_recon, loss_state, loss_reward
-
-    def compute_loss(self, s_t, a_t, s_tp1_true, r_true, dt, alpha, num_rollouts=5, weights=None):
+    def compute_loss(self, s_t, a_t, s_tp1_true, r_true, dt, alpha, num_rollouts=3, weights=None):
         rollout_preds, reward_preds = [], []
 
         for _ in range(num_rollouts):
@@ -321,6 +263,7 @@ class NODA(nn.Module):
             rollout_preds.append(s_pred)
             reward_preds.append(r_pred)
 
+        # average over multiple noise samples (cancels out the Brownian randomness)
         s_pred_mean = torch.stack(rollout_preds, dim=0).mean(dim=0)
         r_pred_mean = torch.stack(reward_preds, dim=0).mean(dim=0)
 
@@ -456,43 +399,7 @@ class NODATrainer:
 
         return mean_loss, mean_recon_loss, mean_state_loss, mean_reward_loss
 
-    # def train_one_epoch(self):
-    #     total_loss = 0
-    #     total_recon_loss = 0
-    #     total_state_loss = 0
-    #     total_reward_loss = 0
-
-    #     # for name, param in self.model.named_parameters():
-    #     #     print(name, param.data.mean().item(), param.grad is not None)
-
-    #     for batch in self.train_loader:
-    #         obss, actions, next_obss, rewards = batch
-
-    #         obss, actions, next_obss, rewards = obss.to(self.device), actions.to(self.device), next_obss.to(self.device), rewards.to(self.device)
-
-    #         # Zero the gradients
-    #         self.optimizer.zero_grad()
-
-    #         # Forward pass: compute the total loss (state + reward prediction loss)
-    #         loss, loss_recon, loss_state, loss_reward = self.model.compute_loss(obss, actions, next_obss, rewards, self.dt, self.alpha)
-            
-    #         # Backpropagation and optimization
-    #         loss.backward()
-    #         self.optimizer.step()
-
-    #         total_loss += loss.item()
-    #         total_recon_loss += loss_recon.item()
-    #         total_state_loss += loss_state.item()
-    #         total_reward_loss += loss_reward.item()
-        
-    #     mean_loss = total_loss / len(self.dataloader)
-    #     mean_recon_loss = total_recon_loss / len(self.dataloader)
-    #     mean_state_loss = total_state_loss / len(self.dataloader)
-    #     mean_reward_loss = total_reward_loss / len(self.dataloader)
-
-    #     return mean_loss, mean_recon_loss, mean_state_loss, mean_reward_loss
-
-    def evaluate_holdout(self):
+    def evaluate_holdout(self, num_rollouts=10):
         """Evaluate model on holdout/validation set."""
         self.model.eval()
         total_loss, total_recon, total_state, total_reward = 0, 0, 0, 0
@@ -501,7 +408,7 @@ class NODATrainer:
             obss, actions, next_obss, rewards = [x.to(self.device) for x in batch]
 
             loss, loss_recon, loss_state, loss_reward = self.model.compute_loss(
-                    obss, actions, next_obss, rewards, self.dt, self.alpha)
+                    obss, actions, next_obss, rewards, self.dt, self.alpha, num_rollouts=num_rollouts)
 
             with torch.no_grad():
                 total_loss += loss.item()
@@ -515,6 +422,58 @@ class NODATrainer:
         mean_reward = total_reward / len(self.holdout_loader)
 
         return mean_loss, mean_recon, mean_state, mean_reward
+
+    def stochastic_evaluate_holdout(self, num_samples=10):
+        """
+        Evaluate holdout loss stochastically by resampling Brownian noise.
+
+        Args:
+            num_samples: how many stochastic rollouts per (s,a) pair to sample.
+
+        Returns:
+            dict with mean ± std for [total, recon, state, reward] losses
+        """
+        self.model.eval()
+
+        all_total, all_recon, all_state, all_reward = [], [], [], []
+
+        for batch in self.holdout_loader:
+            obss, actions, next_obss, rewards = [x.to(self.device) for x in batch]
+
+            # Repeat evaluation with multiple stochastic rollouts
+            for _ in range(num_samples):
+                loss, loss_recon, loss_state, loss_reward = self.model.compute_loss(
+                    obss, actions, next_obss, rewards, self.dt, self.alpha,
+                    num_rollouts=1  # <-- DO NOT average across rollouts
+                )
+
+                all_total.append(loss.item())
+                all_recon.append(loss_recon.item())
+                all_state.append(loss_state.item())
+                all_reward.append(loss_reward.item())
+
+        # Convert to tensors for stats
+        all_total = torch.tensor(all_total)
+        all_recon = torch.tensor(all_recon)
+        all_state = torch.tensor(all_state)
+        all_reward = torch.tensor(all_reward)
+
+        result = {
+            "total_mean": all_total.mean().item(),
+            "total_std": all_total.std().item(),
+            "recon_mean": all_recon.mean().item(),
+            "recon_std": all_recon.std().item(),
+            "state_mean": all_state.mean().item(),
+            "state_std": all_state.std().item(),
+            "reward_mean": all_reward.mean().item(),
+            "reward_std": all_reward.std().item(),
+        }
+
+        # print("Stochastic Holdout Evaluation:")
+        # for k, v in result.items():
+        #     print(f"{k}: {v:.6f}")
+
+        return result
 
     def train(self, 
             weights = None,
@@ -727,120 +686,6 @@ class NODATrainer:
 
         return mse_dict
 
-    # def evaluate_multistep_rollout_with_variance(self, horizons=[5, 10, 20, 50], num_rollouts=100):
-    #     """
-    #     Evaluate multi-step rollout prediction error of the dynamics model.
-    #     Returns both mean and variance across multiple rollouts.
-
-    #     Args:
-    #         horizons: list of rollout horizons to test
-    #         num_rollouts: number of random rollouts sampled
-
-    #     Returns:
-    #         mse_dict: {horizon: {
-    #             "scaled_mean": ..., "scaled_std": ...,
-    #             #"real_mean": ..., "real_std": ...
-    #         }}
-    #     """
-    #     self.model.eval()
-
-    #     obss, actions, next_obss, rewards = self.model.format_samples_for_training(self.data)
-
-    #     data_size = obss.shape[0]
-
-    #     # Normalize with same scalers as training
-    #     obss = self.obs_scaler.transform(obss)
-    #     actions = self.act_scaler.transform(actions)
-    #     next_obss = self.obs_scaler.transform(next_obss)
-
-    #     obss = torch.tensor(obss, dtype=torch.float32).to(self.device)
-    #     actions = torch.tensor(actions, dtype=torch.float32).to(self.device)
-
-    #     mse_dict = {}
-
-    #     for horizon in horizons:
-    #         rollout_preds_all, rollout_truth_all = [], []
-
-    #         # collect rollouts
-    #         for _ in range(num_rollouts):
-    #             idx = torch.randint(0, data_size - horizon - 1, (1,)).item()
-
-    #             s_seq = obss[idx : idx + horizon + 1]
-    #             a_seq = actions[idx : idx + horizon]
-
-    #             rollout_truth = s_seq[1:]  # ground-truth rollout
-    #             s_pred = s_seq[0].unsqueeze(0)
-
-    #             rollout_pred = []
-    #             for t in range(horizon):
-    #                 s_pred, _ = self.model.predict_state_reward(
-    #                     s_pred, a_seq[t].unsqueeze(0), self.dt
-    #                 )
-    #                 rollout_pred.append(s_pred.squeeze(0))
-
-    #             rollout_preds_all.append(torch.stack(rollout_pred))
-    #             rollout_truth_all.append(rollout_truth)
-
-    #         # stack rollouts
-    #         rollout_preds_all = torch.stack(rollout_preds_all)   # [num_rollouts, horizon, state_dim]
-    #         rollout_truth_all = torch.stack(rollout_truth_all)
-
-    #         with torch.no_grad():
-    #             # Scaled space 
-    #             mse_scaled_per_rollout = F.mse_loss(
-    #                 rollout_preds_all, rollout_truth_all, reduction="none"
-    #             ).mean(dim=(1, 2))  # [num_rollouts]
-
-    #             scaled_mean = mse_scaled_per_rollout.mean().item()
-    #             scaled_std = mse_scaled_per_rollout.std().item()
-
-    #             # Real (inverse-transform) space 
-
-    #             # rollout_preds_real = self.obs_scaler.inverse_transform(
-    #             #     rollout_preds_all.cpu().numpy().reshape(-1, obss.shape[-1])
-    #             # )
-
-    #             # rollout_truth_real = self.obs_scaler.inverse_transform(
-    #             #     rollout_truth_all.cpu().numpy().reshape(-1, obss.shape[-1])
-    #             # )
-
-    #             rollout_preds_real = self.obs_scaler.inverse_transform(
-    #                 rollout_preds_all.cpu().numpy().reshape(-1, obss.shape[-1])
-    #             ).reshape(num_rollouts, horizon, -1)
-
-    #             rollout_truth_real = self.obs_scaler.inverse_transform(
-    #                 rollout_truth_all.cpu().numpy().reshape(-1, obss.shape[-1])
-    #             ).reshape(num_rollouts, horizon, -1)
-
-    #             rollout_preds_real = torch.tensor(rollout_preds_real, dtype=torch.float32)
-    #             rollout_truth_real = torch.tensor(rollout_truth_real, dtype=torch.float32)
-
-    #             # print(rollout_preds_real.shape, rollout_truth_real.shape)
-
-    #             self.plot_featurewise_rollout_errors(rollout_preds_real, rollout_truth_real, horizons)
-
-    #             # mse_real_per_rollout = F.mse_loss(
-    #             #     rollout_preds_real, rollout_truth_real, reduction="none"
-    #             # ).mean(dim=(1, 2))  # [num_rollouts]
-
-    #             # real_mean = mse_real_per_rollout.mean().item()
-    #             # real_std = mse_real_per_rollout.std().item()
-
-    #         mse_dict[horizon] = {
-    #             "scaled_mean": scaled_mean,
-    #             "scaled_std": scaled_std,
-    #             # "real_mean": real_mean,
-    #             # "real_std": real_std,
-    #         }
-
-    #         print(
-    #             f"H={horizon}: "
-    #             f"Scaled MSE={scaled_mean:.6f} ± {scaled_std:.6f}"
-    #             # f"Real MSE={real_mean:.6f} ± {real_std:.6f}"
-    #         )
-
-    #     return mse_dict
-
     def evaluate_multistep_rollout_with_variance(self, horizons=[5, 10, 20, 50], num_rollouts=100):
         """
         Evaluate multi-step rollout prediction error of the dynamics model.
@@ -937,6 +782,7 @@ class NODATrainer:
 
     def plot_featurewise_rollout_errors(self, preds, truth, horizons):
         """
+        Feature-wise error plots
         Plot per-feature rollout prediction errors with variance bands.
 
         Args:
@@ -975,8 +821,6 @@ class NODATrainer:
         horizon_len = errors.shape[1]
         horizon_axis = np.arange(1, horizon_len + 1)
 
-
-        ################### 1. Feature-wise error plots ###################
         n_features = len(feature_slices)
         ncols = 3
         nrows = (n_features + ncols - 1) // ncols  # ceil division
@@ -1083,13 +927,13 @@ def train_dynamics_model():
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--num_epochs", type=int, default=50)
     parser.add_argument("--dt", type=float, default=0.02)         # from control_dt (0.02 => 50 Hz)
-    parser.add_argument("--alpha", type=float, default=0.5)
+    parser.add_argument("--alpha", type=float, default=0.8)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--data_load_path", type=str, default="mbrl_dynamics_net/dataset/PreprocessedDataset/train")
     parser.add_argument("--preprocess", type=bool, default=True)
-    # parser.add_argument('--run_name', type=str, default=f"NODA_{datetime.now().strftime('%Y%m%d_%H%M%S')}", help='used for logging to distingush different runs')
-    parser.add_argument('--run_name', type=str, default=f"NODA", help='used for logging')
-    parser.add_argument('--retrain', type=bool, default=False, help='flag to initiate training')
+    parser.add_argument('--run_name', type=str, default=f"NODA_{datetime.now().strftime('%Y%m%d_%H%M%S')}", help='used for logging to distingush different runs')
+    # parser.add_argument('--run_name', type=str, default=f"NODA", help='used for logging')
+    parser.add_argument('--retrain', type=bool, default=True, help='flag to initiate training')
     parser.add_argument('--horizons', type=int, nargs='*', default=[20], help='List of rollout horizons to test')
 
     args = parser.parse_args()
@@ -1195,6 +1039,10 @@ def train_dynamics_model():
         print("Using pretrained dynamics...")
         # noda_trainer.load(log_dirs)
 
+    stats = noda_trainer.stochastic_evaluate_holdout(num_samples=20)
+    print("Stochastic Holdout Evaluation:")
+    for k, v in stats.items():
+        print(f"{k}: {v:.6f}")
 
     # mse_dict = noda_trainer.evaluate_multistep_rollout(horizons=args.horizons, num_rollouts=50)
     
@@ -1216,17 +1064,17 @@ def train_dynamics_model():
     # plt.show()
 
     ###########################
-    mse_dict = noda_trainer.evaluate_multistep_rollout_with_variance(horizons=args.horizons, num_rollouts=100)
+    # mse_dict = noda_trainer.evaluate_multistep_rollout_with_variance(horizons=args.horizons, num_rollouts=100)
 
-    mse_scaled_means, mse_scaled_stds = [], []
+    # mse_scaled_means, mse_scaled_stds = [], []
 
-    for horizon in args.horizons:
-        mse_scaled_means.append(mse_dict[horizon]["scaled_mean"])
-        mse_scaled_stds.append(mse_dict[horizon]["scaled_std"])
+    # for horizon in args.horizons:
+    #     mse_scaled_means.append(mse_dict[horizon]["scaled_mean"])
+    #     mse_scaled_stds.append(mse_dict[horizon]["scaled_std"])
 
-    scaled_stats = (mse_scaled_means, mse_scaled_stds)
+    # scaled_stats = (mse_scaled_means, mse_scaled_stds)
 
-    noda_trainer.plot_rollout_mse_with_variance(args.horizons, scaled_stats, num_rollouts=100)
+    # noda_trainer.plot_rollout_mse_with_variance(args.horizons, scaled_stats, num_rollouts=100)
 
 
     # Encode state
