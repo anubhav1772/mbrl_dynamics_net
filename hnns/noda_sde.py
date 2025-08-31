@@ -23,7 +23,8 @@ from mbrl_dynamics_net.utils.logger import make_log_dirs
 from mbrl_dynamics_net.utils.scaler import StandardScaler
 from torch.utils.tensorboard import SummaryWriter
 
-from mbrl_dynamics_net.utils import logger
+from mbrl_dynamics_net.utils.analyze_features import get_dataset_stats
+from mbrl_dynamics_net.utils import logger 
 # Log directory path
 logger.set_root(os.path.join(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")), "log"))
 
@@ -264,7 +265,7 @@ class NODA(nn.Module):
         s_t_plus1_pred = self.autoencoder.decode(u_next)
         return s_t_plus1_pred, r_pred
 
-    def compute_loss(self, s_t, a_t, s_tp1_true, r_true, dt, alpha, num_rollouts=3, weights=None):
+    def compute_loss(self, s_t, a_t, s_tp1_true, r_true, dt, alpha, num_rollouts=20, weights=None):
         rollout_preds, reward_preds = [], []
 
         for _ in range(num_rollouts):
@@ -272,7 +273,7 @@ class NODA(nn.Module):
             rollout_preds.append(s_pred)
             reward_preds.append(r_pred)
 
-        # average over multiple noise samples (cancels out the Brownian randomness)
+        # Average over multiple noise samples (cancels out the Brownian randomness)
         s_pred_mean = torch.stack(rollout_preds, dim=0).mean(dim=0)
         r_pred_mean = torch.stack(reward_preds, dim=0).mean(dim=0)
 
@@ -289,7 +290,9 @@ class NODA(nn.Module):
         else:
             loss_state = F.mse_loss(s_pred_mean, s_tp1_true)
 
-        loss_reward = F.mse_loss(r_pred_mean, r_true)
+        reward_loss_fn = nn.SmoothL1Loss()
+        loss_reward = reward_loss_fn(r_pred_mean, r_true)
+        # loss_reward = F.mse_loss(r_pred_mean, r_true)
 
         # Composite loss function that mixes multiple MSE objectives (a/c to alpha)
         total_loss = alpha * (loss_recon + loss_state) + (1 - alpha) * loss_reward
@@ -313,6 +316,13 @@ class NODATrainer:
         #                                 torch.tensor(actions, dtype=torch.float32),
         #                                 torch.tensor(next_obss, dtype=torch.float32),
         #                                 torch.tensor(rewards, dtype=torch.float32))
+
+        # Indices of constant features to drop 
+        # [gait (8-10), durations (11), body_roll (14), stance_width (15), stance_length (16), aux_reward (17)]
+        # constant_idx = [8, 9, 10, 11, 14, 15, 16, 17]
+        # # Remove constant features from observations
+        # obss = np.delete(obss, constant_idx, axis=1)
+        # next_obss = np.delete(next_obss, constant_idx, axis=1)
 
         data_size = obss.shape[0]
         holdout_size = min(int(data_size * holdout_ratio), 1000)
@@ -341,7 +351,11 @@ class NODATrainer:
             # # Fit scalers on train split only
             self.obs_scaler.fit(obss[train_idx]) 
             self.act_scaler.fit(actions[train_idx]) 
-            self.rew_scaler.fit(rewards[train_idx]) 
+            self.rew_scaler.fit(rewards[train_idx])
+
+            print(self.obs_scaler.mu, self.obs_scaler.std)
+            print(self.act_scaler.mu, self.act_scaler.std)
+            print(self.rew_scaler.mu, self.rew_scaler.std)
 
             # Transform all data with fitted scalers
             # Both train + holdout 
@@ -352,6 +366,10 @@ class NODATrainer:
 
         else:
             train_idx, holdout_idx = self.load(log_dirs)
+
+            print(self.obs_scaler.mu, self.obs_scaler.std)
+            print(self.act_scaler.mu, self.act_scaler.std)
+            print(self.rew_scaler.mu, self.rew_scaler.std)
 
             obss = self.obs_scaler.transform(obss) 
             actions = self.act_scaler.transform(actions) 
@@ -409,7 +427,7 @@ class NODATrainer:
 
         return mean_loss, mean_recon_loss, mean_state_loss, mean_reward_loss
 
-    def evaluate_holdout(self, num_rollouts=10):
+    def evaluate_holdout(self, num_rollouts=20):
         """Evaluate model on holdout/validation set."""
         self.model.eval()
         total_loss, total_recon, total_state, total_reward = 0, 0, 0, 0
@@ -713,6 +731,9 @@ class NODATrainer:
                 #"real_mean": ..., "real_std": ...
             }}
         """
+        # gait, durations, body_roll, stance_width, stance_length, aux_reward
+        self.constant_idx = [8, 9, 10, 11, 14, 15, 16, 17]  
+
         self.model.eval()
 
         # Unpack tensors from self.holdout_dataset 
@@ -768,6 +789,10 @@ class NODATrainer:
                     rollout_truth_all.cpu().numpy().reshape(-1, obss.shape[-1])
                 ).reshape(num_rollouts, horizon, -1)
 
+                # Drop constant features
+                rollout_preds_real = np.delete(rollout_preds_real, self.constant_idx, axis=2)
+                rollout_truth_real = np.delete(rollout_truth_real, self.constant_idx, axis=2)
+
                 rollout_preds_real = torch.tensor(rollout_preds_real, dtype=torch.float32)
                 rollout_truth_real = torch.tensor(rollout_truth_real, dtype=torch.float32)
 
@@ -789,7 +814,6 @@ class NODATrainer:
 
         return mse_dict
 
-
     def plot_featurewise_rollout_errors(self, preds, truth, horizons):
         """
         Feature-wise error plots
@@ -802,6 +826,28 @@ class NODATrainer:
             horizons: int, horizon length used in rollouts
             num_rollouts: int, number of rollouts
         """
+        # feature_slices = {
+        #     "gravity_vector": slice(0, 3),
+        #     "x_vel": slice(3, 4),
+        #     "y_vel": slice(4, 5),
+        #     "yaw_vel": slice(5, 6),
+        #     "body_height": slice(6, 7),
+        #     "step_freq": slice(7, 8),
+        #     "gait": slice(8, 11),
+        #     "durations": slice(11, 12),
+        #     "footswing_height": slice(12, 13),
+        #     "body_pitch": slice(13, 14),
+        #     "body_roll": slice(14, 15),
+        #     "stance_width": slice(15, 16),
+        #     "stance_length": slice(16, 17),
+        #     "aux_reward": slice(17, 18),
+        #     "dof_pos": slice(18, 30),
+        #     "dof_vel": slice(30, 42),
+        #     "actions": slice(42, 54),
+        #     "clock_inputs": slice(54, 58),
+        # }
+
+        # Without constant features
         feature_slices = {
             "gravity_vector": slice(0, 3),
             "x_vel": slice(3, 4),
@@ -809,18 +855,13 @@ class NODATrainer:
             "yaw_vel": slice(5, 6),
             "body_height": slice(6, 7),
             "step_freq": slice(7, 8),
-            "gait": slice(8, 11),
-            "durations": slice(11, 12),
-            "footswing_height": slice(12, 13),
-            "body_pitch": slice(13, 14),
-            "body_roll": slice(14, 15),
-            "stance_width": slice(15, 16),
-            "stance_length": slice(16, 17),
-            "aux_reward": slice(17, 18),
-            "dof_pos": slice(18, 30),
-            "dof_vel": slice(30, 42),
-            "actions": slice(42, 54),
-            "clock_inputs": slice(54, 58),
+            # constants removed (gait, durations, body_roll, stance_width, stance_length, aux_reward)
+            "footswing_height": slice(8, 9),
+            "body_pitch": slice(9, 10),
+            "dof_pos": slice(10, 22),
+            "dof_vel": slice(22, 34),
+            "actions": slice(34, 46),
+            "clock_inputs": slice(46, 50),
         }
 
         # Compute squared errors per-dim
@@ -895,7 +936,7 @@ class NODATrainer:
             if h <= H:
                 print(f"H={h}: Mean MSE={mean_global[h-1]:.6f} ± {std_global[h-1]:.6f}")
 
-    def plot_rollout_mse_with_variance(self, horizons, scaled_stats, num_rollouts=100):
+    def plot_rollout_mse_with_variance(self, horizons, scaled_stats, num_rollouts=50):
         mse_scaled_means, mse_scaled_stds = scaled_stats
         # mse_real_means, mse_real_stds = real_stats
 
@@ -921,6 +962,111 @@ class NODATrainer:
         plt.grid(True)
         plt.show()
 
+    def evaluate_with_stats(self, horizons=[20], num_rollouts=20, dataset_stats=None):
+        """
+        Evaluate model rollout errors and compare with dataset-level statistics.
+
+        Args:
+            horizons: list of rollout horizons to test
+            num_rollouts: number of stochastic rollouts
+            dataset_stats: dict of {feature: {"mean": np.array, "std": np.array}}
+                           (from your global stats computation)
+        """
+        import pandas as pd
+        feature_slices = {
+            "gravity_vector": slice(0, 3),
+            "x_vel": slice(3, 4),
+            "y_vel": slice(4, 5),
+            "yaw_vel": slice(5, 6),
+            "body_height": slice(6, 7),
+            "step_freq": slice(7, 8),
+            "gait": slice(8, 11),
+            "durations": slice(11, 12),
+            "footswing_height": slice(12, 13),
+            "body_pitch": slice(13, 14),
+            "body_roll": slice(14, 15),
+            "stance_width": slice(15, 16),
+            "stance_length": slice(16, 17),
+            "aux_reward": slice(17, 18),
+            "dof_pos": slice(18, 30),
+            "dof_vel": slice(30, 42),
+            "actions": slice(42, 54),
+            "clock_inputs": slice(54, 58),
+        }
+        self.model.eval()
+        obss, actions, next_obss, rewards = [
+            tensor.clone().to(self.device) for tensor in self.holdout_dataset.tensors
+        ]
+        data_size = obss.shape[0]
+
+        results = []
+
+        for horizon in horizons:
+            preds_all, truth_all = [], []
+
+            for _ in range(num_rollouts):
+                idx = torch.randint(0, data_size - horizon - 1, (1,)).item()
+                s_seq = obss[idx : idx + horizon + 1]
+                a_seq = actions[idx : idx + horizon]
+
+                rollout_truth = s_seq[1:]
+                s_pred = s_seq[0].unsqueeze(0)
+
+                rollout_pred = []
+                for t in range(horizon):
+                    s_pred, _ = self.model.predict_state_reward(
+                        s_pred, a_seq[t].unsqueeze(0), self.dt
+                    )
+                    rollout_pred.append(s_pred.squeeze(0))
+                preds_all.append(torch.stack(rollout_pred))
+                truth_all.append(rollout_truth)
+
+            preds_all = torch.stack(preds_all)   # [N, H, D]
+            truth_all = torch.stack(truth_all)
+
+            # Flatten over rollouts and horizon
+            preds_flat = preds_all.reshape(-1, preds_all.shape[-1]).detach().cpu().numpy()
+            truth_flat = truth_all.reshape(-1, truth_all.shape[-1]).detach().cpu().numpy()
+
+            # Compare per feature group
+            for feat, sl in feature_slices.items():
+                pred_feat = preds_flat[:, sl]
+                true_feat = truth_flat[:, sl]
+
+                # Means
+                pred_mean = pred_feat.mean(axis=0)
+                true_mean = true_feat.mean(axis=0)
+
+                # Bias (relative to dataset mean if given)
+                if dataset_stats is not None:
+                    dataset_mean = dataset_stats[feat]["mean"]
+                    dataset_std = dataset_stats[feat]["std"]
+                else:
+                    dataset_mean = true_mean
+                    dataset_std = true_feat.std(axis=0)
+
+                bias = np.abs(pred_mean - dataset_mean)
+
+                # RMSE
+                rmse = np.sqrt(((pred_feat - true_feat) ** 2).mean(axis=0))
+                rel_rmse = rmse / (dataset_std + 1e-8)
+
+                # Save results
+                for i in range(len(pred_mean)):
+                    results.append({
+                        "feature": feat,
+                        "dim": i,
+                        "dataset_mean": dataset_mean[i],
+                        "pred_mean": pred_mean[i],
+                        "bias": bias[i],
+                        "dataset_std": dataset_std[i],
+                        "rmse": rmse[i],
+                        "rmse/std": rel_rmse[i]
+                    })
+
+        df = pd.DataFrame(results)
+        return df
+
 def train_dynamics_model():
     import argparse
     import random
@@ -929,7 +1075,7 @@ def train_dynamics_model():
     parser.add_argument("--task", type=str, default="aliengo")
     parser.add_argument("--seed", type=int, default=42)
     # Auto-Encoder
-    parser.add_argument("--input_dim", type=int, default=58)    # state dim
+    parser.add_argument("--input_dim", type=int, default=58)    # state dim (50 after dropping 8 constant features)
     parser.add_argument("--action_dim", type=int, default=12)
     parser.add_argument("--latent_dim", type=int, default=2*12) # 2*K canonical states (q, p), K is DoF
     # NODA Trainer
@@ -937,13 +1083,13 @@ def train_dynamics_model():
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--num_epochs", type=int, default=50)
     parser.add_argument("--dt", type=float, default=0.02)         # from control_dt (0.02 => 50 Hz)
-    parser.add_argument("--alpha", type=float, default=0.8)
+    parser.add_argument("--alpha", type=float, default=0.6)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--data_load_path", type=str, default="mbrl_dynamics_net/dataset/PreprocessedDataset/train")
     parser.add_argument("--preprocess", type=bool, default=True)
-    parser.add_argument('--run_name', type=str, default=f"NODA_{datetime.now().strftime('%Y%m%d_%H%M%S')}", help='used for logging to distingush different runs')
-    # parser.add_argument('--run_name', type=str, default=f"NODA", help='used for logging')
-    parser.add_argument('--retrain', type=bool, default=True, help='flag to initiate training')
+    # parser.add_argument('--run_name', type=str, default=f"NODA_{datetime.now().strftime('%Y%m%d_%H%M%S')}", help='used for logging to distingush different runs')
+    parser.add_argument('--run_name', type=str, default=f"NODA1", help='used for logging')
+    parser.add_argument('--retrain', type=bool, default=False, help='flag to initiate training')
     parser.add_argument('--horizons', type=int, nargs='*', default=[20], help='List of rollout horizons to test')
 
     args = parser.parse_args()
@@ -1019,14 +1165,17 @@ def train_dynamics_model():
 
     if args.retrain or not os.path.isfile(os.path.join(log_dirs, "best_model.pth")):
         print("Training from scratch...")
+        constant_idx = [8, 9, 10, 11, 14, 15, 16, 17]
         weights = torch.ones(args.input_dim, device=args.device)
-        # weights[3] = 2.0   # x_vel (index 3)
-        # weights[4] = 2.0   # y_vel (index 4)
-        # weights[42:54] = 1.5  # actions (indices 42–54)
+        # weights[3] = 2.0              # x_vel (index 3)
+        # weights[4] = 2.0              # y_vel (index 4)
+        # weights[42:54] = 1.5          # actions (indices 42–54)
 
-        weights[3] = 2   # x_vel (index 3)
-        weights[4] = 2   # y_vel (index 4)
-        weights[42:54] = 1.5  # actions (indices 42–54)
+        weights[constant_idx] = 0.0     # zero out constants
+
+        weights[3] = 1.0                # x_vel (index 3)
+        weights[4] = 1.0                # y_vel (index 4)
+        weights[42:54] = 1.0            # actions (indices 42–54)
 
         # Normalize to keep loss scale stable
         weights = weights / weights.mean()
@@ -1074,17 +1223,20 @@ def train_dynamics_model():
     # plt.show()
 
     ###########################
-    # mse_dict = noda_trainer.evaluate_multistep_rollout_with_variance(horizons=args.horizons, num_rollouts=100)
+    mse_dict = noda_trainer.evaluate_multistep_rollout_with_variance(horizons=args.horizons, num_rollouts=20)
 
-    # mse_scaled_means, mse_scaled_stds = [], []
+    mse_scaled_means, mse_scaled_stds = [], []
 
-    # for horizon in args.horizons:
-    #     mse_scaled_means.append(mse_dict[horizon]["scaled_mean"])
-    #     mse_scaled_stds.append(mse_dict[horizon]["scaled_std"])
+    for horizon in args.horizons:
+        mse_scaled_means.append(mse_dict[horizon]["scaled_mean"])
+        mse_scaled_stds.append(mse_dict[horizon]["scaled_std"])
 
-    # scaled_stats = (mse_scaled_means, mse_scaled_stds)
+    scaled_stats = (mse_scaled_means, mse_scaled_stds)
 
-    # noda_trainer.plot_rollout_mse_with_variance(args.horizons, scaled_stats, num_rollouts=100)
+    noda_trainer.plot_rollout_mse_with_variance(args.horizons, scaled_stats, num_rollouts=20)
+
+    stats_df = noda_trainer.evaluate_with_stats(dataset_stats=get_dataset_stats()) 
+    print(stats_df)
 
 
     # Encode state
