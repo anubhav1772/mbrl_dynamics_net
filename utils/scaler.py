@@ -12,7 +12,10 @@ class StandardScaler(object):
     def fit(self, data):
         self.mu = np.mean(data, axis=0, keepdims=True)
         self.std = np.std(data, axis=0, keepdims=True)
-        self.std[self.std < 1e-12] = 1.0
+        const_mask = self.std < 1e-12
+        if np.any(const_mask):
+            print(f"[{self.name}] Constant features detected at indices:", np.where(const_mask)[1])
+        self.std[const_mask] = 1.0
 
     def transform(self, data):
         return (data - self.mu) / self.std
@@ -22,8 +25,8 @@ class StandardScaler(object):
     
     def save_scaler(self, save_path):
         if self.name: # self.name is not None and self.name != ""
-            mu_path = path.join(save_path, f"mu_{name}.npy")
-            std_path = path.join(save_path, f"std_{name}.npy")
+            mu_path = path.join(save_path, f"mu_{self.name}.npy")
+            std_path = path.join(save_path, f"std_{self.name}.npy")
         else:
             mu_path = path.join(save_path, "mu.npy")
             std_path = path.join(save_path, "std.npy")
@@ -33,8 +36,8 @@ class StandardScaler(object):
     
     def load_scaler(self, load_path):
         if self.name: # self.name is not None and self.name != ""
-            mu_path = path.join(load_path, f"mu_{name}.npy")
-            std_path = path.join(load_path, f"std_{name}.npy")
+            mu_path = path.join(load_path, f"mu_{self.name}.npy")
+            std_path = path.join(load_path, f"std_{self.name}.npy")
         else:
             mu_path = path.join(load_path, "mu.npy")
             std_path = path.join(load_path, "std.npy")
