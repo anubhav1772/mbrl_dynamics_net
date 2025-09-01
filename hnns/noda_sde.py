@@ -7,6 +7,7 @@ from torchsde import sdeint, SDEStratonovich
 # from torchdiffeq import odeint
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -308,6 +309,7 @@ class NODATrainer:
         self.dt = dt
         self.alpha = alpha
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
+        self.log_dirs = log_dirs
         
         # Prepare data for batching (convert numpy arrays to torch tensors)
         obss, actions, next_obss, rewards = self.model.format_samples_for_training(data)
@@ -800,7 +802,7 @@ class NODATrainer:
                 self.plot_global_rollout_error_curve(rollout_preds_all, rollout_truth_all, horizons)
 
                 # plot featurewise errors
-                self.plot_featurewise_rollout_errors(rollout_preds_real, rollout_truth_real, horizons)
+                self.plot_featurewise_rollout_errors(rollout_preds_real, rollout_truth_real, horizons, save_csv_path="featurewise_mse.csv")
 
             mse_dict[horizon] = {
                 "scaled_mean": scaled_mean,
@@ -814,7 +816,7 @@ class NODATrainer:
 
         return mse_dict
 
-    def plot_featurewise_rollout_errors(self, preds, truth, horizons):
+    def plot_featurewise_rollout_errors(self, preds, truth, horizons, save_csv_path=None):
         """
         Feature-wise error plots
         Plot per-feature rollout prediction errors with variance bands.
@@ -880,6 +882,7 @@ class NODATrainer:
         axes = axes.ravel()  # flatten so we can index like 1D
         
         feature_stats = {}
+        data_dict = {"horizon": horizon_axis}  # For CSV
 
         for ax, (feat, sl) in zip(axes, feature_slices.items()):
             # Select dims corresponding to this feature
@@ -891,6 +894,10 @@ class NODATrainer:
             std_curve = feat_err.std(0).cpu().numpy()
 
             feature_stats[feat] = (mean_curve, std_curve)
+
+            # Add mean_curve to data_dict for CSV
+            data_dict[f"{feat}_mean"] = mean_curve
+            data_dict[f"{feat}_std"] = std_curve
 
             # Plot
             ax.plot(horizon_axis, mean_curve, label=f"{feat} error")
@@ -907,6 +914,12 @@ class NODATrainer:
         axes[-1].set_xlabel("Horizon")
         plt.tight_layout()
         plt.show()
+
+        # Save CSV if requested
+        if save_csv_path:
+            df = pd.DataFrame(data_dict)
+            df.to_csv(os.path.join(self.log_dirs, save_csv_path), index=False)
+            print(f"Saved feature-wise rollout errors to {os.path.join(self.log_dirs, save_csv_path)}")
 
     def plot_global_rollout_error_curve(self, preds, truth, horizons):
         # Compute squared errors per-dim
