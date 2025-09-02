@@ -730,7 +730,6 @@ class NODATrainer:
         Returns:
             mse_dict: {horizon: {
                 "scaled_mean": ..., "scaled_std": ...,
-                #"real_mean": ..., "real_std": ...
             }}
         """
         # gait, durations, body_roll, stance_width, stance_length, aux_reward
@@ -747,7 +746,8 @@ class NODATrainer:
         mse_dict = {}
 
         for horizon in horizons:
-            rollout_preds_all, rollout_truth_all = [], []
+            rollout_s_preds_all, rollout_s_truth_all = [], []
+            rollout_r_preds_all, rollout_r_truth_all = [], []
 
             # collect rollouts
             for _ in range(num_rollouts):
@@ -755,63 +755,82 @@ class NODATrainer:
 
                 s_seq = obss[idx : idx + horizon + 1]
                 a_seq = actions[idx : idx + horizon]
+                r_seq = rewards[idx+1 : idx+horizon+1]
 
-                rollout_truth = s_seq[1:]  # ground-truth rollout
+                rollout_s_truth = s_seq[1:]  # ground-truth rollout
                 s_pred = s_seq[0].unsqueeze(0)
 
-                rollout_pred = []
+                rollout_s_pred, rollout_r_pred = [], []
                 for t in range(horizon):
-                    s_pred, _ = self.model.predict_state_reward(
+                    s_pred, r_pred = self.model.predict_state_reward(
                         s_pred, a_seq[t].unsqueeze(0), self.dt
                     )
-                    rollout_pred.append(s_pred.squeeze(0))
+                    rollout_s_pred.append(s_pred.squeeze(0))
+                    rollout_r_pred.append(r_pred.squeeze(0))
 
-                rollout_preds_all.append(torch.stack(rollout_pred))
-                rollout_truth_all.append(rollout_truth)
+                rollout_s_preds_all.append(torch.stack(rollout_s_pred))
+                rollout_r_preds_all.append(torch.stack(rollout_r_pred))
+                rollout_s_truth_all.append(rollout_s_truth)
+                rollout_r_truth_all.append(r_seq)
 
             # stack rollouts
-            rollout_preds_all = torch.stack(rollout_preds_all)   # [num_rollouts, horizon, state_dim]
-            rollout_truth_all = torch.stack(rollout_truth_all)
+            rollout_s_preds_all = torch.stack(rollout_s_preds_all)   # [num_rollouts, horizon, state_dim]
+            rollout_s_truth_all = torch.stack(rollout_s_truth_all)
+            rollout_r_preds_all = torch.stack(rollout_r_preds_all)   # [num_rollouts, horizon, 1]
+            rollout_r_truth_all = torch.stack(rollout_r_truth_all)
 
             with torch.no_grad():
-                # Scaled space
+                # Scaled Space
+                # State Evaluation
                 mse_scaled_per_rollout = F.mse_loss(
-                    rollout_preds_all, rollout_truth_all, reduction="none"
+                    rollout_s_preds_all, rollout_s_truth_all, reduction="none"
                 ).mean(dim=(1, 2))  # [num_rollouts]
 
-                scaled_mean = mse_scaled_per_rollout.mean().item()
-                scaled_std = mse_scaled_per_rollout.std().item()
+                s_scaled_mean = mse_scaled_per_rollout.mean().item()
+                s_scaled_std = mse_scaled_per_rollout.std().item()
+
+                # Reward Evaluation
+                mse_r_scaled_per_rollout = F.mse_loss(
+                    rollout_r_preds_all, rollout_r_truth_all, reduction="none"
+                ).mean(dim=(1, 2))  # [num_rollouts]
+
+                r_scaled_mean = mse_r_scaled_per_rollout.mean().item()
+                r_scaled_std = mse_r_scaled_per_rollout.std().item()
 
                 # Real (inverse-transform) space
-                rollout_preds_real = self.obs_scaler.inverse_transform(
-                    rollout_preds_all.cpu().numpy().reshape(-1, obss.shape[-1])
+                rollout_s_preds_real = self.obs_scaler.inverse_transform(
+                    rollout_s_preds_all.cpu().numpy().reshape(-1, obss.shape[-1])
                 ).reshape(num_rollouts, horizon, -1)
 
-                rollout_truth_real = self.obs_scaler.inverse_transform(
-                    rollout_truth_all.cpu().numpy().reshape(-1, obss.shape[-1])
+                rollout_s_truth_real = self.obs_scaler.inverse_transform(
+                    rollout_s_truth_all.cpu().numpy().reshape(-1, obss.shape[-1])
                 ).reshape(num_rollouts, horizon, -1)
 
                 # Drop constant features
-                rollout_preds_real = np.delete(rollout_preds_real, self.constant_idx, axis=2)
-                rollout_truth_real = np.delete(rollout_truth_real, self.constant_idx, axis=2)
+                rollout_s_preds_real = np.delete(rollout_s_preds_real, self.constant_idx, axis=2)
+                rollout_s_truth_real = np.delete(rollout_s_truth_real, self.constant_idx, axis=2)
 
-                rollout_preds_real = torch.tensor(rollout_preds_real, dtype=torch.float32)
-                rollout_truth_real = torch.tensor(rollout_truth_real, dtype=torch.float32)
+                rollout_s_preds_real = torch.tensor(rollout_s_preds_real, dtype=torch.float32)
+                rollout_s_truth_real = torch.tensor(rollout_s_truth_real, dtype=torch.float32)
 
-                ###############
-                self.plot_global_rollout_error_curve(rollout_preds_all, rollout_truth_all, horizons)
+                # Computed in scaled space
+                self.plot_global_rollout_error_curve(rollout_s_preds_all, rollout_s_truth_all, horizons)
 
-                # plot featurewise errors
-                self.plot_featurewise_rollout_errors(rollout_preds_real, rollout_truth_real, horizons, save_csv_path="featurewise_mse.csv")
+                # Plot featurewise errors
+                # Computed in real/unnormalized space
+                self.plot_featurewise_rollout_errors(rollout_s_preds_real, rollout_s_truth_real, horizons, save_csv_path="featurewise_mse.csv")
 
             mse_dict[horizon] = {
-                "scaled_mean": scaled_mean,
-                "scaled_std": scaled_std,
+                "state_scaled_mean": s_scaled_mean,
+                "state_scaled_std": s_scaled_std,
+                "reward_scaled_mean": r_scaled_mean,
+                "reward_scaled_std": r_scaled_std,
             }
 
             print(
-                f"H={horizon}: "
-                f"Scaled MSE={scaled_mean:.6f} ± {scaled_std:.6f}"
+                f"Horizon={horizon}: \n"
+                f"\tState Scaled MSE= [{s_scaled_mean:.6f} ± {s_scaled_std:.6f}]\n"
+                f"\tReward Scaled MSE= [{r_scaled_mean:.6f} ± {r_scaled_std:.6f}]"
             )
 
         return mse_dict
@@ -1241,8 +1260,8 @@ def train_dynamics_model():
     mse_scaled_means, mse_scaled_stds = [], []
 
     for horizon in args.horizons:
-        mse_scaled_means.append(mse_dict[horizon]["scaled_mean"])
-        mse_scaled_stds.append(mse_dict[horizon]["scaled_std"])
+        mse_scaled_means.append(mse_dict[horizon]["state_scaled_mean"])
+        mse_scaled_stds.append(mse_dict[horizon]["state_scaled_std"])
 
     scaled_stats = (mse_scaled_means, mse_scaled_stds)
 
