@@ -115,6 +115,8 @@ class HamiltonianSDE(SDEStratonovich):
         )
 
         # Neural network for external forces Q(a)
+        # Assumes state-independent generalized forces
+        # Forces depend only on control torques
         self.force_net = nn.Sequential(
             nn.Linear(action_dim, 64),
             nn.ReLU(),
@@ -122,6 +124,15 @@ class HamiltonianSDE(SDEStratonovich):
             nn.ReLU(),
             nn.Linear(64, self.K)  # K = DoF
         )
+
+        # To model contacts, damping, or state-dependent actuation
+        # self.force_net = nn.Sequential(
+        #     nn.Linear(latent_dim + action_dim, 64),
+        #     nn.ReLU(),
+        #     nn.Linear(64, 64),
+        #     nn.ReLU(),
+        #     nn.Linear(64, self.K) # Output generalized forces
+        # )
 
     def hamiltonian_drift(self, t, u, a=None):
         if a is None:
@@ -134,7 +145,7 @@ class HamiltonianSDE(SDEStratonovich):
         p.requires_grad_(True)
 
         # Compute Hamiltonian input
-        H_in = torch.cat([q, p], dim=-1)  # H_in: (64, 24)
+        H_in = torch.cat([q, p], dim=-1)      # H_in: (64, 24)
 
         H_scalar = self.hamiltonian_net(H_in)
         grads = torch.autograd.grad(
@@ -147,7 +158,11 @@ class HamiltonianSDE(SDEStratonovich):
 
         # Extract gradients for each sample in the batch
         dq_dt = grads[1]
-        dp_dt = -grads[0] + self.force_net(a)
+
+        # Generalized forces depend only on actions Q(a_t)
+        dp_dt = -grads[0] + self.force_net(a) # Fine if actions = direct torques
+        # State-dependent forces case Q(u_t,a_t)
+        # dp_dt = -grads[0] + self.force_net(torch.cat([u, a], dim=-1))
 
         du_dt = torch.cat([dq_dt, dp_dt], dim=-1)
 
