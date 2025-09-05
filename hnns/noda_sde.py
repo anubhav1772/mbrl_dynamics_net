@@ -813,12 +813,32 @@ class NODATrainer:
                 rollout_s_preds_real = torch.tensor(rollout_s_preds_real, dtype=torch.float32)
                 rollout_s_truth_real = torch.tensor(rollout_s_truth_real, dtype=torch.float32)
 
-                # Computed in scaled space
-                self.plot_global_rollout_error_curve(rollout_s_preds_all, rollout_s_truth_all, horizons)
+                # Reward (In Real Space)
+                rollout_r_preds_real = self.rew_scaler.inverse_transform(
+                    rollout_r_preds_all.cpu().numpy().reshape(-1, rewards.shape[-1])
+                ).reshape(num_rollouts, horizon, -1)
 
-                # Plot featurewise errors
+                rollout_r_truth_real = self.rew_scaler.inverse_transform(
+                    rollout_r_truth_all.cpu().numpy().reshape(-1, rewards.shape[-1])
+                ).reshape(num_rollouts, horizon, -1)
+
+                rollout_r_preds_real = torch.tensor(rollout_r_preds_real, dtype=torch.float32)
+                rollout_r_truth_real = torch.tensor(rollout_r_truth_real, dtype=torch.float32)
+
+                # Computed in scaled space
+                # State
+                #self.plot_global_rollout_error_curve(rollout_s_preds_all, rollout_s_truth_all, horizons)
+                # Reward
+                #self.plot_global_rollout_error_curve(rollout_r_preds_all, rollout_r_truth_all, horizons, title="Global Reward Rollout Error Curve"               # Plot featurewise errors
+                
+                self.plot_global_state_reward_error_curves(rollout_s_preds_all, rollout_s_truth_all, rollout_r_preds_all, rollout_r_truth_all, horizons)
+
                 # Computed in real/unnormalized space
-                self.plot_featurewise_rollout_errors(rollout_s_preds_real, rollout_s_truth_real, horizons, save_csv_path="featurewise_mse.csv")
+                # self.plot_featurewise_rollout_errors(rollout_s_preds_real, rollout_s_truth_real, horizons, save_csv_path="featurewise_mse.csv")
+                self.plot_featurewise_rollout_errors(rollout_s_preds_real, rollout_s_truth_real, horizons, 
+                                                    reward_preds=rollout_r_preds_real,
+                                                    reward_truth=rollout_r_truth_real,
+                                                    save_csv_path="featurewise_mse.csv")
 
             mse_dict[horizon] = {
                 "state_scaled_mean": s_scaled_mean,
@@ -835,7 +855,37 @@ class NODATrainer:
 
         return mse_dict
 
-    def plot_featurewise_rollout_errors(self, preds, truth, horizons, save_csv_path=None):
+    def plot_global_state_reward_error_curves(self, state_preds, state_truth, reward_preds, reward_truth, horizons):
+        errors_state = (state_preds - state_truth).pow(2)   # [N, H, D]
+        errors_reward = (reward_preds - reward_truth).pow(2)  # [N, H, 1]
+
+        horizon_axis = np.arange(1, errors_state.shape[1] + 1)
+
+        # State global error
+        mean_state = errors_state.mean((0, 2)).cpu().numpy()
+        std_state  = errors_state.mean(2).std(0).cpu().numpy()
+
+        # Reward global error
+        mean_reward = errors_reward.mean((0, 2)).cpu().numpy()
+        std_reward  = errors_reward.mean(2).std(0).cpu().numpy()
+
+        plt.figure(figsize=(7,5))
+
+        plt.plot(horizon_axis, mean_state, label="State Mean MSE", color="blue")
+        plt.fill_between(horizon_axis, mean_state-std_state, mean_state+std_state, alpha=0.3, color="blue")
+
+        plt.plot(horizon_axis, mean_reward, label="Reward Mean MSE", color="red")
+        plt.fill_between(horizon_axis, mean_reward-std_reward, mean_reward+std_reward, alpha=0.3, color="red")
+
+        plt.title("Global Rollout Error Curves (State vs Reward)")
+        plt.xlabel("Horizon")
+        plt.ylabel("Mean Squared Error")
+        plt.grid(True)
+        plt.legend()
+        plt.show()
+
+    def plot_featurewise_rollout_errors(self, preds, truth, horizons, 
+                                        reward_preds=None, reward_truth=None, save_csv_path=None):
         """
         Feature-wise error plots
         Plot per-feature rollout prediction errors with variance bands.
@@ -843,32 +893,13 @@ class NODATrainer:
         Args:
             preds: torch.Tensor, shape [num_rollouts, horizon, state_dim] predicted rollout
             truth: torch.Tensor, shape [num_rollouts, horizon, state_dim] ground-truth rollout
-            feature_slices: dict, {feature_name: slice(indices)} mapping feature names to index ranges
+            reward_preds: torch.Tensor, shape [num_rollouts, horizon, 1], predicted rewards (real space)
+            reward_truth: torch.Tensor, shape [num_rollouts, horizon, 1], ground-truth rewards (real space)
             horizons: int, horizon length used in rollouts
             num_rollouts: int, number of rollouts
         """
-        # feature_slices = {
-        #     "gravity_vector": slice(0, 3),
-        #     "x_vel": slice(3, 4),
-        #     "y_vel": slice(4, 5),
-        #     "yaw_vel": slice(5, 6),
-        #     "body_height": slice(6, 7),
-        #     "step_freq": slice(7, 8),
-        #     "gait": slice(8, 11),
-        #     "durations": slice(11, 12),
-        #     "footswing_height": slice(12, 13),
-        #     "body_pitch": slice(13, 14),
-        #     "body_roll": slice(14, 15),
-        #     "stance_width": slice(15, 16),
-        #     "stance_length": slice(16, 17),
-        #     "aux_reward": slice(17, 18),
-        #     "dof_pos": slice(18, 30),
-        #     "dof_vel": slice(30, 42),
-        #     "actions": slice(42, 54),
-        #     "clock_inputs": slice(54, 58),
-        # }
 
-        # Without constant features
+        # State feature slices (constants removed)
         feature_slices = {
             "gravity_vector": slice(0, 3),
             "x_vel": slice(3, 4),
@@ -876,7 +907,6 @@ class NODATrainer:
             "yaw_vel": slice(5, 6),
             "body_height": slice(6, 7),
             "step_freq": slice(7, 8),
-            # constants removed (gait, durations, body_roll, stance_width, stance_length, aux_reward)
             "footswing_height": slice(8, 9),
             "body_pitch": slice(9, 10),
             "dof_pos": slice(10, 22),
@@ -885,13 +915,19 @@ class NODATrainer:
             "clock_inputs": slice(46, 50),
         }
 
-        # Compute squared errors per-dim
+        # Compute squared errors per-dim for states
         errors = (preds - truth).pow(2)   # [N, H, D]
         N, H, D = errors.shape
 
+        # If reward is given, compute squared error
+        if reward_preds is not None and reward_truth is not None:
+            reward_errors = (reward_preds - reward_truth).pow(2)  # [N, H, 1]
+            feature_slices["reward"] = slice(D, D+1)  # virtual index for plotting
+            # Concatenate reward errors with state errors so plotting loop works uniformly
+            errors = torch.cat([errors, reward_errors], dim=2)
+
         # Horizon axis
-        horizon_len = errors.shape[1]
-        horizon_axis = np.arange(1, horizon_len + 1)
+        horizon_axis = np.arange(1, H + 1)
 
         n_features = len(feature_slices)
         ncols = 3
@@ -899,7 +935,7 @@ class NODATrainer:
 
         fig, axes = plt.subplots(nrows, ncols, figsize=(14, 3*nrows), sharex=True)
         axes = axes.ravel()  # flatten so we can index like 1D
-        
+
         feature_stats = {}
         data_dict = {"horizon": horizon_axis}  # For CSV
 
@@ -926,7 +962,7 @@ class NODATrainer:
             ax.set_ylabel("MSE")
             ax.grid(True)
 
-        # Hide any unused subplots if features < nrows*ncols
+        # Hide unused plots
         for i in range(len(feature_slices), len(axes)):
             fig.delaxes(axes[i])
 
@@ -940,7 +976,113 @@ class NODATrainer:
             df.to_csv(os.path.join(self.log_dirs, save_csv_path), index=False)
             print(f"Saved feature-wise rollout errors to {os.path.join(self.log_dirs, save_csv_path)}")
 
-    def plot_global_rollout_error_curve(self, preds, truth, horizons):
+
+    # def plot_featurewise_rollout_errors(self, preds, truth, horizons, save_csv_path=None):
+    #     """
+    #     Feature-wise error plots
+    #     Plot per-feature rollout prediction errors with variance bands.
+
+    #     Args:
+    #         preds: torch.Tensor, shape [num_rollouts, horizon, state_dim] predicted rollout
+    #         truth: torch.Tensor, shape [num_rollouts, horizon, state_dim] ground-truth rollout
+    #         feature_slices: dict, {feature_name: slice(indices)} mapping feature names to index ranges
+    #         horizons: int, horizon length used in rollouts
+    #         num_rollouts: int, number of rollouts
+    #     """
+    #     # feature_slices = {
+    #     #     "gravity_vector": slice(0, 3),
+    #     #     "x_vel": slice(3, 4),
+    #     #     "y_vel": slice(4, 5),
+    #     #     "yaw_vel": slice(5, 6),
+    #     #     "body_height": slice(6, 7),
+    #     #     "step_freq": slice(7, 8),
+    #     #     "gait": slice(8, 11),
+    #     #     "durations": slice(11, 12),
+    #     #     "footswing_height": slice(12, 13),
+    #     #     "body_pitch": slice(13, 14),
+    #     #     "body_roll": slice(14, 15),
+    #     #     "stance_width": slice(15, 16),
+    #     #     "stance_length": slice(16, 17),
+    #     #     "aux_reward": slice(17, 18),
+    #     #     "dof_pos": slice(18, 30),
+    #     #     "dof_vel": slice(30, 42),
+    #     #     "actions": slice(42, 54),
+    #     #     "clock_inputs": slice(54, 58),
+    #     # }
+
+    #     # Without constant features
+    #     feature_slices = {
+    #         "gravity_vector": slice(0, 3),
+    #         "x_vel": slice(3, 4),
+    #         "y_vel": slice(4, 5),
+    #         "yaw_vel": slice(5, 6),
+    #         "body_height": slice(6, 7),
+    #         "step_freq": slice(7, 8),
+    #         # constants removed (gait, durations, body_roll, stance_width, stance_length, aux_reward)
+    #         "footswing_height": slice(8, 9),
+    #         "body_pitch": slice(9, 10),
+    #         "dof_pos": slice(10, 22),
+    #         "dof_vel": slice(22, 34),
+    #         "actions": slice(34, 46),
+    #         "clock_inputs": slice(46, 50),
+    #     }
+
+    #     # Compute squared errors per-dim
+    #     errors = (preds - truth).pow(2)   # [N, H, D]
+    #     N, H, D = errors.shape
+
+    #     # Horizon axis
+    #     horizon_len = errors.shape[1]
+    #     horizon_axis = np.arange(1, horizon_len + 1)
+
+    #     n_features = len(feature_slices)
+    #     ncols = 3
+    #     nrows = (n_features + ncols - 1) // ncols  # ceil division
+
+    #     fig, axes = plt.subplots(nrows, ncols, figsize=(14, 3*nrows), sharex=True)
+    #     axes = axes.ravel()  # flatten so we can index like 1D
+        
+    #     feature_stats = {}
+    #     data_dict = {"horizon": horizon_axis}  # For CSV
+
+    #     for ax, (feat, sl) in zip(axes, feature_slices.items()):
+    #         # Select dims corresponding to this feature
+    #         feat_err = errors[:, :, sl]   # [N, H, dim_of_feature]
+    #         feat_err = feat_err.mean(-1)  # avg over dims → [N, H]
+
+    #         # Mean & std across rollouts
+    #         mean_curve = feat_err.mean(0).cpu().numpy()
+    #         std_curve = feat_err.std(0).cpu().numpy()
+
+    #         feature_stats[feat] = (mean_curve, std_curve)
+
+    #         # Add mean_curve to data_dict for CSV
+    #         data_dict[f"{feat}_mean"] = mean_curve
+    #         data_dict[f"{feat}_std"] = std_curve
+
+    #         # Plot
+    #         ax.plot(horizon_axis, mean_curve, label=f"{feat} error")
+    #         ax.fill_between(horizon_axis, mean_curve - std_curve, mean_curve + std_curve,
+    #                         alpha=0.3)
+    #         ax.set_title(feat, pad=-10)
+    #         ax.set_ylabel("MSE")
+    #         ax.grid(True)
+
+    #     # Hide any unused subplots if features < nrows*ncols
+    #     for i in range(len(feature_slices), len(axes)):
+    #         fig.delaxes(axes[i])
+
+    #     axes[-1].set_xlabel("Horizon")
+    #     plt.tight_layout()
+    #     plt.show()
+
+    #     # Save CSV if requested
+    #     if save_csv_path:
+    #         df = pd.DataFrame(data_dict)
+    #         df.to_csv(os.path.join(self.log_dirs, save_csv_path), index=False)
+    #         print(f"Saved feature-wise rollout errors to {os.path.join(self.log_dirs, save_csv_path)}")
+
+    def plot_global_rollout_error_curve(self, preds, truth, horizons, title="Global State Rollout Error Curve"):
         # Compute squared errors per-dim
         errors = (preds - truth).pow(2)   # [N, H, D]
         N, H, D = errors.shape
@@ -956,7 +1098,7 @@ class NODATrainer:
         plt.plot(horizon_axis, mean_global, label="Global Mean MSE", color="blue")
         plt.fill_between(horizon_axis, mean_global-std_global, mean_global+std_global,
                          alpha=0.3, color="blue")
-        plt.title("Global Rollout Error Curve")
+        plt.title(title)
         plt.xlabel("Horizon")
         plt.ylabel("Mean Squared Error")
         plt.grid(True)
@@ -1257,18 +1399,18 @@ def train_dynamics_model():
     ###########################
     mse_dict = noda_trainer.evaluate_multistep_rollout_with_variance(horizons=args.horizons, num_rollouts=20)
 
-    mse_scaled_means, mse_scaled_stds = [], []
+    # mse_scaled_means, mse_scaled_stds = [], []
 
-    for horizon in args.horizons:
-        mse_scaled_means.append(mse_dict[horizon]["state_scaled_mean"])
-        mse_scaled_stds.append(mse_dict[horizon]["state_scaled_std"])
+    # for horizon in args.horizons:
+    #     mse_scaled_means.append(mse_dict[horizon]["state_scaled_mean"])
+    #     mse_scaled_stds.append(mse_dict[horizon]["state_scaled_std"])
 
-    scaled_stats = (mse_scaled_means, mse_scaled_stds)
+    # scaled_stats = (mse_scaled_means, mse_scaled_stds)
 
-    noda_trainer.plot_rollout_mse_with_variance(args.horizons, scaled_stats, num_rollouts=20)
+    # noda_trainer.plot_rollout_mse_with_variance(args.horizons, scaled_stats, num_rollouts=20)
 
-    stats_df = noda_trainer.evaluate_with_stats(dataset_stats=get_dataset_stats()) 
-    print(stats_df)
+    # stats_df = noda_trainer.evaluate_with_stats(dataset_stats=get_dataset_stats()) 
+    # print(stats_df)
 
 
     # Encode state
