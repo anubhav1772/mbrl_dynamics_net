@@ -245,6 +245,7 @@ class HNNSDE(nn.Module):
         self.autoencoder = AutoEncoder(input_dim, latent_dim).to(device)
         self.ode_func = HamiltonianSDE(latent_dim, action_dim).to(device)
         self.reward_decoder = RewardDecoder(latent_dim, action_dim).to(device)
+        self.features = StateFeatures()
         # self.latent_dim = latent_dim
         # self.action_dim = action_dim
 
@@ -310,30 +311,30 @@ class HNNSDE(nn.Module):
         s_pred_mean = torch.stack(rollout_preds, dim=0).mean(dim=0)
         r_pred_mean = torch.stack(reward_preds, dim=0).mean(dim=0)
 
-        # Encode/decode for reconstruction regularization
-        _, _, u = self.autoencoder.encode(s_t)
-        s_recon = self.autoencoder.decode(u)
+        # Physics indices (pos + vel only) 
+        dof_pos_idx = self.features["dof_pos"]               # slice(18, 30)
+        dof_vel_idx = self.features["dof_vel"]               # slice(30, 42)
 
-        # Reconstruction loss (only on physics part)
-        dof_pos_idx = self.idx_dof_pos   # [18:30]
-        dof_vel_idx = self.idx_dof_vel   # [30:42]
+        physics_t = torch.cat([s_t[:, dof_pos_idx], s_t[:, dof_vel_idx]], dim=-1)
+        physics_tp1_true = torch.cat([s_tp1_true[:, dof_pos_idx], s_tp1_true[:, dof_vel_idx]], dim=-1)
 
-        u_recon = torch.cat([s_recon[:, dof_pos_idx], s_recon[:, dof_vel_idx]], dim=-1)
-        u_true = torch.cat([s_t[:, dof_pos_idx], s_t[:, dof_vel_idx]], dim=-1)
-        loss_recon = F.mse_loss(u_recon, u_true)
+        # Encode/decode physics state for reconstruction
+        _, _, u = self.autoencoder.encode(physics_t)         # input only pos+vel
+        physics_recon = self.autoencoder.decode(u)           # reconstruct pos+vel
+        loss_recon = F.mse_loss(physics_recon, physics_t)
 
-        # State prediction loss (only physics part)
+        # State prediction loss (only on physics part)
         u_pred = torch.cat([s_pred_mean[:, dof_pos_idx], s_pred_mean[:, dof_vel_idx]], dim=-1)
-        u_tp1_true = torch.cat([s_tp1_true[:, dof_pos_idx], s_tp1_true[:, dof_vel_idx]], dim=-1)
-        loss_state = F.mse_loss(u_pred, u_tp1_true)
+        loss_state = F.mse_loss(u_pred, physics_tp1_true)
 
-        # Reward loss (decoder or direct function)
+        # Reward loss
         reward_loss_fn = nn.SmoothL1Loss()
         loss_reward = reward_loss_fn(r_pred_mean, r_true)
 
         # Composite loss
         total_loss = alpha * (loss_recon + loss_state) + (1 - alpha) * loss_reward
         return total_loss, loss_recon, loss_state, loss_reward
+
 
 class HNNSDETrainer:
     def __init__(self, model, data, batch_size, lr, dt, alpha, log_dirs, holdout_ratio=0.15, retrain=False, device='cpu'):
@@ -1153,7 +1154,7 @@ def train_dynamics_model():
     parser.add_argument("--input_dim", type=int, default=24)
     parser.add_argument("--action_dim", type=int, default=12)
     parser.add_argument("--latent_dim", type=int, default=2*12) # 2*K canonical states (q, p), K is DoF
-    # NODA Trainer
+    # HNN-SDE Trainer
     parser.add_argument("--lr", type=float, default=3e-4)       # learning rate
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--num_epochs", type=int, default=50)
@@ -1162,8 +1163,8 @@ def train_dynamics_model():
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--data_load_path", type=str, default="mbrl_dynamics_net/dataset/PreprocessedDataset/train")
     parser.add_argument("--preprocess", type=bool, default=True)
-    parser.add_argument('--run_name', type=str, default=f"NODA_{datetime.now().strftime('%Y%m%d_%H%M%S')}", help='used for logging to distingush different runs')
-    # parser.add_argument('--run_name', type=str, default=f"NODA2", help='used for logging')
+    parser.add_argument('--run_name', type=str, default=f"HNNSDE_{datetime.now().strftime('%Y%m%d_%H%M%S')}", help='used for logging to distingush different runs')
+    # parser.add_argument('--run_name', type=str, default=f"HNNSDE", help='used for logging')
     parser.add_argument('--retrain', type=bool, default=True, help='flag to initiate training')
     parser.add_argument('--horizons', type=int, nargs='*', default=[20], help='List of rollout horizons to test')
 
@@ -1178,7 +1179,7 @@ def train_dynamics_model():
             "lr": args.lr,
             "dt": args.dt,
             "alpha": args.alpha,
-            "class": "NODA",
+            "class": "HNN-SDE",
             },
         "meta": {
             "device": args.device,
