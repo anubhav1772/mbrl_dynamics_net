@@ -261,43 +261,108 @@ class HNNSDE(nn.Module):
         a_t stays constant during the short integration window (matching dt).
 
         Args:
-            s_t          : Current state [batch, state_dim]
+            s_t          : Current full state [batch, state_dim=58]
             a_t          : Current action [batch, action_dim]
             dt           : Integration step size
         """
 
-        # Encode observation to canonical (q, p) and full latent u
-        q, p, u = self.autoencoder.encode(s_t)
+        # Split state into physics vs. context 
+        dof_pos_idx = self.features["dof_pos"]   # slice(18, 30)
+        dof_vel_idx = self.features["dof_vel"]   # slice(30, 42)
 
-        # Predict reward from q, p, and a_t
-        r_pred = self.reward_decoder(q, p, a_t)
+        # Direct slicing (no autoencoder)
+        # q = s_t[:, dof_pos_idx]
+        # p = s_t[:, dof_vel_idx]
+        # u = torch.cat([q, p], dim=-1)  # [batch, 24]
 
-        # Integrate canonical state forward one time step
+        # Physics-only autoencoder
+        physics_s_t = torch.cat([s_t[:, dof_pos_idx], s_t[:, dof_vel_idx]], dim=-1)
+        q, p, u = self.autoencoder.encode(physics_s_t)
+
+        # Context = all features except physics
+        context_mask = torch.ones(s_t.shape[1], dtype=torch.bool, device=s_t.device)
+        context_mask[dof_pos_idx] = False
+        context_mask[dof_vel_idx] = False
+        c_t = s_t[:, context_mask]  # [batch, context_dim]
+
+        # Predict reward (conditioned on physics, action, context) 
+        r_pred = self.reward_decoder(q, p, a_t, c_t)
+
+        # Integrate Hamiltonian SDE forward
         t_span = torch.tensor([0, dt], dtype=torch.float32, device=self.device)
-        # u_traj = odeint(lambda t, u_: self.ode_func(t, u_, a_t),
-        #                 u,
-        #                 t_span,
-        #                 method='rk4',
-        #                 options={'step_size': dt})
 
-        sde_with_action = ActionSDE(self.ode_func, a_t)
+        # Pass both action and context to SDE class
+        sde_with_action = ActionSDE(self.ode_func, a_t, c_t)
 
-        u_traj = sdeint(sde_with_action,              # HamiltonianSDE subclass
-                        u,                          # initial latent [q,p]
-                        t_span,                     # tensor([0., dt])
-                        method='heun',              # Milstein/Heun for Stratonovich
-                        dt=dt,                      # integration step
-                        # names={'drift': 'f', 
-                        #        'diffusion': 'g'},   # match torchsde API
-                        # args=(a_t,),                # pass action to drift & diffusion
-                    )
+        u_traj = sdeint(
+            sde_with_action,   # HamiltonianSDE subclass
+            u,                 # initial latent [q,p]
+            t_span,            # integration interval
+            method='heun',     # Stratonovich-compatible integrator
+            dt=dt
+        )
 
-        # next canonical state
-        u_next = u_traj[-1]                         # Shape: [batch_size, latent_dim]
+        u_next = u_traj[-1]  # [batch, 24]
+        q_next, p_next = torch.chunk(u_next, 2, dim=-1)
 
-        # Decode back to predicted next observation
-        s_t_plus1_pred = self.autoencoder.decode(u_next)
-        return s_t_plus1_pred, r_pred
+        # Reconstruct full next state (58D)
+        s_tp1_pred = s_t.clone()
+
+        # Update physics
+        s_tp1_pred[:, dof_pos_idx] = q_next
+        s_tp1_pred[:, dof_vel_idx] = p_next
+
+        # Update "prev_action" slot in context with current
+        prev_action_idx = self.features["actions"]
+        s_tp1_pred[:, prev_action_idx] = a_t
+
+        # Other context (commands, stance width, etc.) carried forward unchanged
+
+        return s_tp1_pred, r_pred
+
+
+    # def predict_state_reward(self, s_t, a_t, dt):
+    #     """Predict next state and reward stochastically.
+    #     a_t stays constant during the short integration window (matching dt).
+
+    #     Args:
+    #         s_t          : Current state [batch, state_dim]
+    #         a_t          : Current action [batch, action_dim]
+    #         dt           : Integration step size
+    #     """
+
+    #     # Encode observation to canonical (q, p) and full latent u
+    #     q, p, u = self.autoencoder.encode(s_t)
+
+    #     # Predict reward from q, p, and a_t
+    #     r_pred = self.reward_decoder(q, p, a_t)
+
+    #     # Integrate canonical state forward one time step
+    #     t_span = torch.tensor([0, dt], dtype=torch.float32, device=self.device)
+    #     # u_traj = odeint(lambda t, u_: self.ode_func(t, u_, a_t),
+    #     #                 u,
+    #     #                 t_span,
+    #     #                 method='rk4',
+    #     #                 options={'step_size': dt})
+
+    #     sde_with_action = ActionSDE(self.ode_func, a_t)
+
+    #     u_traj = sdeint(sde_with_action,              # HamiltonianSDE subclass
+    #                     u,                          # initial latent [q,p]
+    #                     t_span,                     # tensor([0., dt])
+    #                     method='heun',              # Milstein/Heun for Stratonovich
+    #                     dt=dt,                      # integration step
+    #                     # names={'drift': 'f', 
+    #                     #        'diffusion': 'g'},   # match torchsde API
+    #                     # args=(a_t,),                # pass action to drift & diffusion
+    #                 )
+
+    #     # next canonical state
+    #     u_next = u_traj[-1]                         # Shape: [batch_size, latent_dim]
+
+    #     # Decode back to predicted next observation
+    #     s_t_plus1_pred = self.autoencoder.decode(u_next)
+    #     return s_t_plus1_pred, r_pred
 
     def compute_loss(self, s_t, a_t, s_tp1_true, r_true, dt, alpha, num_rollouts=20):
         rollout_preds, reward_preds = [], []
