@@ -41,55 +41,54 @@ class AutoEncoder(nn.Module):
 
         self.latent_dim = latent_dim
 
-        # Encoder: state -> [q, p]
-        # self.encoder = nn.Sequential(
-        #     nn.Linear(input_dim, 512),
-        #     nn.ReLU(),
-        #     nn.Linear(512, latent_dim)
-        # )
-
+        # Encoder: maps physics state -> latent [q, p]
         self.encoder = nn.Sequential(
-            nn.Linear(input_dim, 512),
+            nn.Linear(input_dim, 128),
             nn.ReLU(),
 
-            nn.Linear(512, 512),
+            nn.Linear(128, 128),
             nn.ReLU(),
 
-            nn.Linear(512, latent_dim)
+            nn.Linear(128, latent_dim)
         )
 
-        # Decoder: [q, p] -> state
-        # self.decoder = nn.Sequential(
-        #     nn.Linear(latent_dim, 512),
-        #     nn.ReLU(),
-        #     nn.Linear(512, input_dim)
-        # )
-
+        # Decoder: latent [q, p] -> reconstructed physics state
         self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, 512),
+            nn.Linear(latent_dim, 128),
             nn.ReLU(),
 
-            nn.Linear(512, 512),
+            nn.Linear(128, 128),
             nn.ReLU(),
 
-            nn.Linear(512, input_dim)
+            nn.Linear(128, input_dim)
         )
 
     def forward(self, s):
-        u = self.encoder(s)               # latent state: u = [q, p]
+        """
+        Full autoencoder pass.
+        Args:
+            s: [batch, input_dim] (dof_pos + dof_vel) - physics_state
+        Returns:
+            recon: reconstructed physics state
+            (q, p): canonical split of latent
+            u: full latent vector [q, p]
+        """
+        u = self.encoder(s)               
 
         # Decoding: Canonical states back to the state
         s_reconstructed = self.decoder(u)
 
-        q, p = torch.chunk(u, 2, dim=-1)  # Split canonical variables
+        q, p = torch.chunk(u, 2, dim=-1)  # Split canonical variables (enforce q/p split)
         return s_reconstructed, (q, p), u
 
     def encode(self, s):
+        """Encode physics state into latent [q, p]."""
         u = self.encoder(s)
         q, p = torch.chunk(u, 2, dim=-1)
         return q, p, u
 
     def decode(self, u):
+        """Decode latent [q, p] back to physics state."""
         return self.decoder(u)
 
 class HamiltonianSDE(SDEStratonovich):
@@ -185,7 +184,7 @@ class HamiltonianSDE(SDEStratonovich):
 
         return du_dt
 
-    def stochastic_diffusion(self, t, u, a=None):
+    def stochastic_diffusion(self, t, u, a=None, c=None):
         if a is None:
             a = torch.zeros(u.shape[0], self.action_dim, device=u.device)
         return self.diffusion_net(torch.cat([u, a], dim=-1))
@@ -204,47 +203,54 @@ class ActionSDE(SDEStratonovich):
         base_sde (SDEStratonovich): The underlying SDE model defining f(t, u, a) and g(t, u, a).
         a_t (Tensor): The fixed action to be passed into the base SDE's drift and diffusion during integration.
     """
-    def __init__(self, base_sde, a_t):
+    def __init__(self, base_sde, a_t, c_t):
         super().__init__(noise_type=base_sde.noise_type)
         self.sde_type = base_sde.sde_type
         self.base_sde = base_sde
         self.a_t = a_t
-    
+        self.c_t = c_t    
+
     def f(self, t, u):
         return self.base_sde.hamiltonian_drift(t, u, self.a_t)
     
     def g(self, t, u):
-        return self.base_sde.stochastic_diffusion(t, u, self.a_t)
+        return self.base_sde.stochastic_diffusion(t, u, self.a_t, self.c_t)
 
 class RewardDecoder(nn.Module):
-    def __init__(self, latent_dim, action_dim) -> None:
+    def __init__(self, latent_dim, action_dim, context_dim=0) -> None:
         super().__init__()
-        
-        # self.reward_net = nn.Sequential(
-        #     nn.Linear(latent_dim + action_dim, 128),
-        #     nn.ReLU(),
-        #     nn.Linear(128, 1)
-        # )
-        
+
         self.reward_net = nn.Sequential(
-            nn.Linear(latent_dim + action_dim, 128),
+            nn.Linear(latent_dim + action_dim + context_dim, 128),
             nn.ReLU(),
             nn.Linear(128, 128),
             nn.ReLU(),
             nn.Linear(128, 1)
         )
 
-    def forward(self, q, p, a):
-        u = torch.cat([q, p], dim=-1)
-        return self.reward_net(torch.cat([u, a], dim=-1))  # shape: [B, 1]
+    def forward(self, u, a, c=None):
+        """
+        Args:
+            u    : the canonical state vector in latent space - [q, p]
+            a    : actions
+            c    : context (optional tensor, e.g. gait, commands)
+        """
+        # u = torch.cat([q, p], dim=-1)
+
+        if c is not None:
+            x = torch.cat([u, a, c], dim=-1)
+        else:
+            x = torch.cat([u, a], dim=-1)
+
+        return self.reward_net(x)   # shape: [B, 1]
 
 class HNNSDE(nn.Module):
-    def __init__(self, input_dim, latent_dim, action_dim, device='cpu') -> None:
+    def __init__(self, input_dim, latent_dim, action_dim, context_dim, device='cpu') -> None:
         super().__init__()
         self.device = device
         self.autoencoder = AutoEncoder(input_dim, latent_dim).to(device)
         self.ode_func = HamiltonianSDE(latent_dim, action_dim).to(device)
-        self.reward_decoder = RewardDecoder(latent_dim, action_dim).to(device)
+        self.reward_decoder = RewardDecoder(latent_dim, action_dim, context_dim).to(device)
         self.features = StateFeatures()
         # self.latent_dim = latent_dim
         # self.action_dim = action_dim
@@ -286,7 +292,7 @@ class HNNSDE(nn.Module):
         c_t = s_t[:, context_mask]  # [batch, context_dim]
 
         # Predict reward (conditioned on physics, action, context) 
-        r_pred = self.reward_decoder(q, p, a_t, c_t)
+        r_pred = self.reward_decoder(u, a_t, c_t)
 
         # Integrate Hamiltonian SDE forward
         t_span = torch.tensor([0, dt], dtype=torch.float32, device=self.device)
