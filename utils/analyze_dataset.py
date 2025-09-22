@@ -18,7 +18,7 @@ from sklearn.cluster import DBSCAN
 
 # data = OfflineDatasetLoader().get_dataset('dataset/go1')
 
-def process_data(observations):
+def process_data(self, observations):
         # print(f"Processing...")
 
         x0 = observations[0, 58]
@@ -45,8 +45,8 @@ def process_data(observations):
             observations[i, 58] = observations[i, 58] - L * np.cos(theta0) + L
             observations[i, 59] = observations[i, 59] - L * np.sin(theta0)
 
-            observations[i, 61] += L * S
-            observations[i, 62] -= L * C
+            observations[i, 61] += L * S * observations[i, 72]
+            observations[i, 62] -= L * C * observations[i, 72]
 
             R = np.array([[C, S, 0],
                           [-S, C, 0],
@@ -55,7 +55,8 @@ def process_data(observations):
             v_ref = np.array([[observations[i, 61]],
                               [observations[i, 62]],
                               [0]])
-            v = np.dot(R, v_ref)
+            # Rotate + bias
+            v = np.dot(R, v_ref) + np.array([[0], [L * observations[i, 72]], [0]]) 
             observations[i, 61] = v[0]
             observations[i, 62] = v[1]
 
@@ -111,7 +112,7 @@ for filename in os.listdir(path):
             max_reward = -1
             reward = compute_reward(observations, actions)
             max_reward = max(max_reward, max(reward))
-            rewards_per_episode.extend(reward)
+            rewards_per_episode.extend(reward)    
 
 # for key, value in data.items():
 #     if key == 'rewards':

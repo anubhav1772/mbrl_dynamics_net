@@ -42,6 +42,7 @@ class OfflineDatasetLoader:
                                                                            np.std(dataset_real['rewards'])))
         return dataset_real
 
+    
     def process_data(self, observations):
         # print(f"Processing...")
 
@@ -69,8 +70,8 @@ class OfflineDatasetLoader:
             observations[i, 58] = observations[i, 58] - L * np.cos(theta0) + L
             observations[i, 59] = observations[i, 59] - L * np.sin(theta0)
 
-            observations[i, 61] += L * S
-            observations[i, 62] -= L * C
+            observations[i, 61] += L * S * observations[i, 72]
+            observations[i, 62] -= L * C * observations[i, 72]
 
             R = np.array([[C, S, 0],
                           [-S, C, 0],
@@ -79,7 +80,8 @@ class OfflineDatasetLoader:
             v_ref = np.array([[observations[i, 61]],
                               [observations[i, 62]],
                               [0]])
-            v = np.dot(R, v_ref)
+            # Rotate + bias
+            v = np.dot(R, v_ref) + np.array([[0], [L * observations[i, 72]], [0]]) 
             observations[i, 61] = v[0]
             observations[i, 62] = v[1]
 
