@@ -92,78 +92,69 @@ class AutoEncoder(nn.Module):
         return self.decoder(u)
 
 class HamiltonianSDE(SDEStratonovich):
-    def __init__(self, latent_dim=24, action_dim=12, context_dim=34):
+    def __init__(self, latent_dim=24, action_dim=12, context_dim=34, force_mode="ua"):
+        """
+        Args:
+            latent_dim: latent dimension (must be even)
+            action_dim: number of action dims
+            context_dim: context dim (gait, gravity, etc.)
+            force_mode: "a" | "ac" | "uac"
+                - "a":   forces depend only on actions
+                - "ac":  forces depend on actions + context
+                - "uac": forces depend on (u, a, c)
+        """
         super().__init__(noise_type="diagonal")
         self.sde_type = "stratonovich"
         self.action_dim = action_dim
         self.latent_dim = latent_dim
         self.context_dim = context_dim
+        self.force_mode = force_mode
+
         assert latent_dim % 2 == 0, "latent_dim must be even"
         self.K = latent_dim // 2
 
-        # Neural network representing the Hamiltonian H(q, p)
+        # Hamiltonian H(q, p)
         self.hamiltonian_net = nn.Sequential(
             nn.Linear(latent_dim, 128),
             nn.Tanh(),
-            nn.Linear(128, 1)   # scalar Hamiltonian
+            nn.Linear(128, 1)
         )
 
-        # Neural network for diffusion term g(u, a)
-        # Modeled as a diagonal matrix (noise applied independently per dimension).
-        # self.diffusion_net = nn.Sequential(
-        #     nn.Linear(latent_dim + action_dim, 64),
-        #     nn.ReLU(),
-        #     nn.Linear(64, latent_dim)  # diagonal noise
-        # )
-
-        # Diffusion net can depend on (u, a, c)
+        # Diffusion g(u, a, c)
         self.diffusion_net = nn.Sequential(
             nn.Linear(latent_dim + action_dim + context_dim, 64),
             nn.ReLU(),
-            nn.Linear(64, latent_dim)  # diagonal diffusion
+            nn.Linear(64, latent_dim)
         )
 
-        # Neural network for external forces Q(a)
-        # Assumes state-independent generalized forces
-        # Forces depend only on control torques
-        # self.force_net = nn.Sequential(
-        #     nn.Linear(action_dim, 64),
-        #     nn.ReLU(),
-        #     nn.Linear(64, 64),
-        #     nn.ReLU(),
-        #     nn.Linear(64, self.K)  # K = DoF
-        # )
+        # Force net: input size depends on force_mode
+        if self.force_mode == "a":
+            force_in_dim = action_dim
+        elif self.force_mode == "ac":
+            force_in_dim = action_dim + context_dim
+        elif self.force_mode == "uac":
+            force_in_dim = latent_dim + action_dim + context_dim
+        else:
+            raise ValueError(f"Invalid force_mode: {self.force_mode}")
 
-        # To model contacts, damping, or state-dependent actuation
-        # self.force_net = nn.Sequential(
-        #     nn.Linear(context_dim + action_dim, 64),
-        #     nn.ReLU(),
-        #     nn.Linear(64, 64),
-        #     nn.ReLU(),
-        #     nn.Linear(64, self.K) # Output generalized forces
-        # )
-
-        # context conditions forces/noise
         self.force_net = nn.Sequential(
-            nn.Linear(action_dim + context_dim, 64),
+            nn.Linear(force_in_dim, 64),
             nn.ReLU(),
-            nn.Linear(64, self.K)  # generalized forces
+            nn.Linear(64, self.K)        # generalized forces
         )
 
-    def hamiltonian_drift(self, t, u, a=None):
+    def hamiltonian_drift(self, t, u, a=None, c=None):
         if a is None:
             a = torch.zeros(u.shape[0], self.action_dim, device=u.device)
-        
-        q, p = torch.chunk(u, 2, dim=-1)
+        if c is None:
+            c = torch.zeros(u.shape[0], self.context_dim, device=u.device)
 
-        # Ensure q and p require gradients
+        q, p = torch.chunk(u, 2, dim=-1)
         q.requires_grad_(True)
         p.requires_grad_(True)
 
-        # Compute Hamiltonian input
-        H_in = torch.cat([q, p], dim=-1)      # H_in: (64, 24)
-
-        H_scalar = self.hamiltonian_net(H_in)
+        # Hamiltonian dynamics
+        H_scalar = self.hamiltonian_net(torch.cat([q, p], dim=-1))
         grads = torch.autograd.grad(
             outputs=H_scalar,
             inputs=(q, p),
@@ -172,36 +163,33 @@ class HamiltonianSDE(SDEStratonovich):
             create_graph=True
         )
 
-        # Extract gradients for each sample in the batch
         dq_dt = grads[1]
 
-        # Generalized forces depend only on actions Q(a_t)
-        dp_dt = -grads[0] + self.force_net(a) # Fine if actions = direct torques
-        # State-dependent forces case Q(u_t,a_t)
-        # dp_dt = -grads[0] + self.force_net(torch.cat([u, a], dim=-1))
+        # Force input selection
+        if self.force_mode == "a":
+            force_in = a
+        elif self.force_mode == "ac":
+            force_in = torch.cat([a, c], dim=-1)
+        elif self.force_mode == "uac":
+            force_in = torch.cat([u, a, c], dim=-1)
 
-        du_dt = torch.cat([dq_dt, dp_dt], dim=-1)
-
-        return du_dt
+        dp_dt = -grads[0] + self.force_net(force_in)
+        return torch.cat([dq_dt, dp_dt], dim=-1)
 
     def stochastic_diffusion(self, t, u, a=None, c=None):
         if a is None:
             a = torch.zeros(u.shape[0], self.action_dim, device=u.device)
-        return self.diffusion_net(torch.cat([u, a], dim=-1))
+        if c is None:
+            c = torch.zeros(u.shape[0], self.context_dim, device=u.device)
+        return self.diffusion_net(torch.cat([u, a, c], dim=-1))
 
 class ActionSDE(SDEStratonovich):
-    """Wrapper for an SDE model that injects a fixed action vector into both the drift (f) 
-    and diffusion (g) functions during integration.
+    """Wrapper for an SDE model that injects a fixed action and context vector
+    into both the drift (f) and diffusion (g) functions during integration.
 
-    This is useful when integrating stochastic dynamics models (in our case, HamiltonianSDE) 
-    where the action is constant over the integration window (matching dt), such as in 
-    short-horizon model prediction or single-step rollout.
-
-    Attributes:
-        sde_type (str): Inherited from base_sde; specifies the SDE interpretation ('ito' or 'stratonovich').
-                        Required by torchsde solvers to choose the correct numerical integration scheme.
-        base_sde (SDEStratonovich): The underlying SDE model defining f(t, u, a) and g(t, u, a).
-        a_t (Tensor): The fixed action to be passed into the base SDE's drift and diffusion during integration.
+    Useful when integrating stochastic dynamics models (HamiltonianSDE) where
+    the action and context are constant over the integration window (dt),
+    such as in short-horizon prediction or single-step rollout.
     """
     def __init__(self, base_sde, a_t, c_t):
         super().__init__(noise_type=base_sde.noise_type)
@@ -211,7 +199,7 @@ class ActionSDE(SDEStratonovich):
         self.c_t = c_t    
 
     def f(self, t, u):
-        return self.base_sde.hamiltonian_drift(t, u, self.a_t)
+        return self.base_sde.hamiltonian_drift(t, u, self.a_t, self.c_t)
     
     def g(self, t, u):
         return self.base_sde.stochastic_diffusion(t, u, self.a_t, self.c_t)
@@ -245,11 +233,11 @@ class RewardDecoder(nn.Module):
         return self.reward_net(x)   # shape: [B, 1]
 
 class HNNSDE(nn.Module):
-    def __init__(self, input_dim, latent_dim, action_dim, context_dim, device='cpu') -> None:
+    def __init__(self, input_dim, latent_dim, action_dim, context_dim, force_mode, device='cpu') -> None:
         super().__init__()
         self.device = device
         self.autoencoder = AutoEncoder(input_dim, latent_dim).to(device)
-        self.ode_func = HamiltonianSDE(latent_dim, action_dim).to(device)
+        self.ode_func = HamiltonianSDE(latent_dim, action_dim, context_dim, force_mode).to(device)
         self.reward_decoder = RewardDecoder(latent_dim, action_dim, context_dim).to(device)
         self.features = StateFeatures()
         # self.latent_dim = latent_dim
@@ -502,7 +490,7 @@ class HNNSDETrainer:
         self.train_loader = DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True)
         self.holdout_loader = DataLoader(self.holdout_dataset, batch_size=64, shuffle=False)
 
-    def train_one_epoch(self, weights):
+    def train_one_epoch(self):
         self.model.train()
         total_loss, total_recon_loss, total_state_loss, total_reward_loss = 0, 0, 0, 0
 
@@ -517,7 +505,7 @@ class HNNSDETrainer:
 
             # Forward pass: compute the total loss (state + reward prediction loss)
             loss, loss_recon, loss_state, loss_reward = self.model.compute_loss(
-                obss, actions, next_obss, rewards, self.dt, self.alpha, weights=weights
+                obss, actions, next_obss, rewards, self.dt, self.alpha
             )
             
             # Backpropagation and optimization
@@ -613,7 +601,6 @@ class HNNSDETrainer:
         return result
 
     def train(self, 
-            weights = None,
             num_epochs=1000, 
             wandb = None, 
             tensorboard_writer = None, 
@@ -625,7 +612,7 @@ class HNNSDETrainer:
         best_holdout_loss = float('inf')
         patience_counter = 0
         for epoch in range(num_epochs):
-            train_loss, train_recon, train_state, train_reward = self.train_one_epoch(weights)
+            train_loss, train_recon, train_state, train_reward = self.train_one_epoch()
             val_loss, val_recon, val_state, val_reward = self.evaluate_holdout()
 
             # Logging
@@ -1224,12 +1211,14 @@ def train_dynamics_model():
     # Auto-Encoder
     parser.add_argument("--input_dim", type=int, default=24)
     parser.add_argument("--action_dim", type=int, default=12)
-    parser.add_argument("--latent_dim", type=int, default=2*12) # 2*K canonical states (q, p), K is DoF
+    parser.add_argument("--latent_dim", type=int, default=2*12)     # 2*K canonical states (q, p), K is DoF
+    parser.add_argument("--context_dim", type=int, default=34)      # 58 - 24(dof_vel+dof_pos) = 34
+    parser.add_argument("--force_mode", type=str, default="uac")    # "a" | "ac" | "uac"
     # HNN-SDE Trainer
-    parser.add_argument("--lr", type=float, default=3e-4)       # learning rate
+    parser.add_argument("--lr", type=float, default=3e-4)           # learning rate
     parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--num_epochs", type=int, default=50)
-    parser.add_argument("--dt", type=float, default=0.02)         # from control_dt (0.02 => 50 Hz)
+    parser.add_argument("--num_epochs", type=int, default=100)
+    parser.add_argument("--dt", type=float, default=0.02)           # from control_dt (0.02 => 50 Hz)
     parser.add_argument("--alpha", type=float, default=0.6)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--data_load_path", type=str, default="mbrl_dynamics_net/dataset/PreprocessedDataset/train")
@@ -1300,7 +1289,7 @@ def train_dynamics_model():
         print(f"log_dirs = {log_dirs}")
         tensorboard_writer = SummaryWriter(log_dir=os.path.join(log_dirs, "tensorboard"))
 
-        model = HNNSDE(args.input_dim, args.latent_dim, args.action_dim, device=args.device)
+        model = HNNSDE(args.input_dim, args.latent_dim, args.action_dim, args.context_dim, args.force_mode, device=args.device)
         hnnsde_trainer = HNNSDETrainer(model, data, 
                               batch_size=args.batch_size, 
                               lr=args.lr, 
@@ -1313,24 +1302,14 @@ def train_dynamics_model():
         if args.retrain or not os.path.isfile(os.path.join(log_dirs, "best_model.pth")):
             print("Training from scratch...")
 
-            # Only dof_pos (indices 18-29) and dof_vel (indices 30-41) contribute
-            weights = torch.zeros(args.input_dim, device=args.device)
-            weights[18:30] = 1.0   # dof_pos (12 dims)
-            weights[30:42] = 1.0   # dof_vel (12 dims)
-
-            # Normalize to keep loss scale stable
-            weights = weights / weights.mean()
-
             if use_wandb:
-                noda_trainer.train(
-                    weights=weights,
+                hnnsde_trainer.train(
                     num_epochs=args.num_epochs, 
                     wandb=wandb, 
                     save_path=log_dirs
                 )
             else:
-                noda_trainer.train(
-                    weights=weights,
+                hnnsde_trainer.train(
                     num_epochs=args.num_epochs, 
                     tensorboard_writer=tensorboard_writer,
                     save_path=log_dirs
