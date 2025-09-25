@@ -305,6 +305,7 @@ class EnsembleDynamics:
 
     def train(
         self,
+        load_path,
         data: Dict,
         logger: Logger,
         wandb = None,
@@ -312,9 +313,8 @@ class EnsembleDynamics:
         max_epochs: Optional[float] = None,
         max_epochs_since_update: int = 5,
         batch_size: int = 256,
-        holdout_ratio: float = 0.2,
+        holdout_ratio: float = 0.15,
         logvar_loss_coef: float = 0.01,
-        load_path,
     ) -> None:
         '''Trains the ensemble model on a dataset using early stopping and holdout validation.
         Split data into train and holdout sets.
@@ -335,8 +335,8 @@ class EnsembleDynamics:
         # Randomly shuffle and split data into:
         # Training set & Holdout (validation) set
 
-        # holdout_size = min(int(data_size * holdout_ratio), 1000)
-        # train_size = data_size - holdout_size
+        holdout_size = min(int(data_size * holdout_ratio), 1000)
+        train_size = data_size - holdout_size
         # train_splits, holdout_splits = torch.utils.data.random_split(range(data_size), (train_size, holdout_size))
         # train_inputs, train_targets = inputs[train_splits.indices], targets[train_splits.indices]
         # holdout_inputs, holdout_targets = inputs[holdout_splits.indices], targets[holdout_splits.indices]
@@ -473,7 +473,7 @@ class EnsembleDynamics:
         self.model.load_state_dict(torch.load(os.path.join(load_path, "dynamics.pth"), map_location=self.model.device))
         self.scaler.load_scaler(load_path)
 
-    def evaluate_rollout(self, init_obss: np.ndarray, rollout_length: int):
+    # def evaluate_rollout(self, init_obss: np.ndarray, rollout_length: int):
 
 
 # def rollout(init_obss: np.ndarray, rollout_length: int) -> Tuple[Dict[str, np.ndarray], Dict]:
@@ -642,9 +642,9 @@ def train_dynamics_model():
         # dynamic training
         print("Starting dynamics model training...")
         if use_wandb:
-            dynamics.train(data, logger, wandb=wandb, load_path=idx_load_path)
+            dynamics.train(idx_load_path, data, logger, wandb=wandb)
         else:
-            dynamics.train(data, logger, tensorboard_writer=tensorboard_writer, load_path=idx_load_path)
+            dynamics.train(idx_load_path, data, logger, tensorboard_writer=tensorboard_writer)
             tensorboard_writer.close()
 
 if __name__ == '__main__':
