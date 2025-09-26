@@ -25,6 +25,8 @@ def termination_fn_hopper(obs, act, next_obs):
                     * (height > .7) \
                     * (np.abs(angle) < .2)
 
+    # print(height, angle)
+
     done = ~not_done
     done = done[:,None]
     return done
@@ -149,6 +151,37 @@ def termination_fn_go1(obs, act, next_obs):
     return np.any(result, axis=1).reshape(-1, 1)
     #return next_obs[:][0:12]>dof_limit[:][2] | next_obs[:][0:12]<dof_limit[:][1] | next_obs[:][12:24]>dof_limit[:][0] | next_obs[:][12:24]<-dof_limit[:][0]
 
+def termination_fn_aliengo(obs, act, next_obs):
+    # [[FR_hip, FR_Thigh, FR_Calf],
+    #  [FL_hip, FL_Thigh, FL_Calf],
+    #  [RR_hip, RR_Thigh, RR_Calf],
+    #  [RL_hip, RL_Thigh, RL_Calf]]
+    dof_limit = np.array([[33.5, -0.873, 1.047, 20],
+                        [33.5, -0.524, 3.927, 20],
+                        [33.5, -2.775, -0.611, 20],
+                        [33.5, -0.873, 1.047, 20],
+                        [33.5, -0.524, 3.927, 20],
+                        [33.5, -2.775, -0.611, 20],
+                        [33.5, -0.873, 1.047, 20],
+                        [33.5, -0.524, 3.927, 20],
+                        [33.5, -2.775, -0.611, 20],
+                        [33.5, -0.873, 1.047, 20],
+                        [33.5, -0.524, 3.927, 20],
+                        [33.5, -2.775, -0.611, 20]]).astype(np.float32)
+    """ self.dof,
+        self.dof_vel,
+        self.action,"""
+    print(dof_limit[:,2] )
+    out1 = next_obs[:,0:12] >  dof_limit[:,2]
+    out2 = next_obs[:,0:12] < dof_limit[:,1]
+    out3 = next_obs[:,12:24] > dof_limit[:,0]
+    out4 = next_obs[:,12:24] < -dof_limit[:,0]
+
+    result = out1 | out2
+    result = result | out3
+    result = result | out4
+    return result
+    #return next_obs[:][0:12]>dof_limit[:][2] | next_obs[:][0:12]<dof_limit[:][1] | next_obs[:][12:24]>dof_limit[:][0] | next_obs[:][12:24]<-dof_limit[:][0]
 
 def get_termination_fn(task):
     if 'halfcheetahvel' in task:
@@ -176,6 +209,9 @@ def get_termination_fn(task):
     elif 'door' in task:
         return terminaltion_fn_door
     elif 'go1' in task:
-        return termination_fn_go1
+        #return termination_fn_go1
+        return termination_fn_hopper
+    elif 'aliengo' in task:
+        return termination_fn_hopper
     else:
         raise np.zeros
