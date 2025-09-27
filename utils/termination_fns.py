@@ -168,20 +168,19 @@ def termination_fn_aliengo(obs, act, next_obs):
                         [33.5, -0.873, 1.047, 20],
                         [33.5, -0.524, 3.927, 20],
                         [33.5, -2.775, -0.611, 20]]).astype(np.float32)
-    """ self.dof,
-        self.dof_vel,
-        self.action,"""
-    print(dof_limit[:,2] )
-    out1 = next_obs[:,0:12] >  dof_limit[:,2]
-    out2 = next_obs[:,0:12] < dof_limit[:,1]
-    out3 = next_obs[:,12:24] > dof_limit[:,0]
-    out4 = next_obs[:,12:24] < -dof_limit[:,0]
+    
+    dof_pos = next_obs[:, 18:30] # indices for dof_pos state
+    dof_vel = next_obs[:, 30:42] # indices for dof_vel state
 
-    result = out1 | out2
-    result = result | out3
-    result = result | out4
+    # Check limit violation
+    # Return TRUE in case of violation
+    out1 = dof_pos  >  dof_limit[:, 2]
+    out2 = dof_pos  <  dof_limit[:, 1]
+    out3 = dof_vel  >  dof_limit[:, 0]
+    out4 = dof_vel  < -dof_limit[:, 0]
+
+    result = out1 | out2 | out3 | out4
     return result
-    #return next_obs[:][0:12]>dof_limit[:][2] | next_obs[:][0:12]<dof_limit[:][1] | next_obs[:][12:24]>dof_limit[:][0] | next_obs[:][12:24]<-dof_limit[:][0]
 
 def get_termination_fn(task):
     if 'halfcheetahvel' in task:
