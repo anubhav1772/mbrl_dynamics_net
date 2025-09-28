@@ -182,6 +182,52 @@ def termination_fn_aliengo(obs, act, next_obs):
     result = out1 | out2 | out3 | out4
     return result
 
+def termination_fn_aliengo_v1(obs, act, next_obs):
+    assert len(obs.shape) == len(next_obs.shape) == len(act.shape) == 2
+
+    # body_height = next_obs[:, 6]      # commanded body height
+    # body_pitch  = next_obs[:, 13]     # commanded pitch
+    # body_roll   = next_obs[:, 14]     # commanded roll
+
+    # not_done =  np.isfinite(next_obs).all(axis=-1) \
+    #                 * np.abs(next_obs[:,1:] < 100).all(axis=-1) \
+    #                 * (height > .7) \
+    #                 * (np.abs(angle) < .2)
+
+    # print(height, angle)
+
+    # Orientation check via gravity vector (robot flipped if z-component is too small/negative)
+    gravity_z = next_obs[:, 2]                 # z-component of gravity vector
+    orientation_violation = gravity_z > -0.6   # fell if tilted too far
+
+    done = orientation_violation[:, None]      # shape (batch, 1) for consistency
+    return done
+
+def termination_fn_aliengo_v2(obs, act, next_obs):
+    assert len(obs.shape) == len(next_obs.shape) == len(act.shape) == 2
+
+    # Extract DOF positions and velocities
+    dof_pos = next_obs[:, 18:30]
+    dof_vel = next_obs[:, 30:42]
+
+    # Aliengo joint limits
+    pos_upper = np.array([ 1.047,  3.927, -0.611] * 4)   # rad
+    pos_lower = np.array([-0.873, -0.524, -2.775] * 4)   # rad
+    vel_limit = 20                                       # rad/s
+    torque_limit = 33.5                                  # Nm
+
+    # Check joint violations
+    joint_pos_violation = np.any((dof_pos > pos_upper) | (dof_pos < pos_lower), axis=1)
+    joint_vel_violation = np.any(np.abs(dof_vel) > vel_limit, axis=1)
+
+    # Orientation check via gravity vector (robot flipped if z-component is too small/negative)
+    gravity_z = next_obs[:, 2]
+    orientation_violation = abs(gravity_z) < 0.6   # fell if tilted too far
+
+    # Combine all conditions
+    done = joint_pos_violation | joint_vel_violation | orientation_violation
+    return done[:, None]
+
 def get_termination_fn(task):
     if 'halfcheetahvel' in task:
         return termination_fn_halfcheetahveljump
@@ -211,6 +257,7 @@ def get_termination_fn(task):
         #return termination_fn_go1
         return termination_fn_hopper
     elif 'aliengo' in task:
-        return termination_fn_hopper
+        #return termination_fn_aliengo
+        return termination_fn_aliengo_v1
     else:
         raise np.zeros
