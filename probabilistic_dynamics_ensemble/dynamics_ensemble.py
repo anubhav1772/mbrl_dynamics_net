@@ -305,6 +305,7 @@ class EnsembleDynamics:
 
     def train(
         self,
+        load_path,
         data: Dict,
         logger: Logger,
         wandb = None,
@@ -312,7 +313,7 @@ class EnsembleDynamics:
         max_epochs: Optional[float] = None,
         max_epochs_since_update: int = 5,
         batch_size: int = 256,
-        holdout_ratio: float = 0.2,
+        holdout_ratio: float = 0.15,
         logvar_loss_coef: float = 0.01,
     ) -> None:
         '''Trains the ensemble model on a dataset using early stopping and holdout validation.
@@ -333,11 +334,18 @@ class EnsembleDynamics:
         # Reserve up to 1000 points for holdout set
         # Randomly shuffle and split data into:
         # Training set & Holdout (validation) set
+
         holdout_size = min(int(data_size * holdout_ratio), 1000)
         train_size = data_size - holdout_size
-        train_splits, holdout_splits = torch.utils.data.random_split(range(data_size), (train_size, holdout_size))
-        train_inputs, train_targets = inputs[train_splits.indices], targets[train_splits.indices]
-        holdout_inputs, holdout_targets = inputs[holdout_splits.indices], targets[holdout_splits.indices]
+        # train_splits, holdout_splits = torch.utils.data.random_split(range(data_size), (train_size, holdout_size))
+        # train_inputs, train_targets = inputs[train_splits.indices], targets[train_splits.indices]
+        # holdout_inputs, holdout_targets = inputs[holdout_splits.indices], targets[holdout_splits.indices]
+
+        # Using the same split indices as HNN-SDE model for evaluation consistency
+        train_idx = np.load(os.path.join(load_path, "train_idx.npy"))
+        holdout_idx = np.load(os.path.join(load_path, "holdout_idx.npy"))
+        train_inputs, train_targets = inputs[train_idx], targets[train_idx]
+        holdout_inputs, holdout_targets = inputs[holdout_idx], targets[holdout_idx]
 
         # Normalize Inputs
         self.scaler.fit(train_inputs)
@@ -354,7 +362,7 @@ class EnsembleDynamics:
         epoch = 0
         cnt = 0
         logger.log("Training dynamics:")
-        while True:
+        while True: 
             epoch += 1
             # Train models on current training data
             train_loss = self.learn(train_inputs[data_idxes], train_targets[data_idxes], batch_size, logvar_loss_coef)
@@ -465,52 +473,169 @@ class EnsembleDynamics:
         self.model.load_state_dict(torch.load(os.path.join(load_path, "dynamics.pth"), map_location=self.model.device))
         self.scaler.load_scaler(load_path)
 
-# def rollout(init_obss: np.ndarray, rollout_length: int) -> Tuple[Dict[str, np.ndarray], Dict]:
-#     num_transitions = 0
-#     rewards_arr = np.array([])
-#     rollout_transitions = defaultdict(list)
+    @torch.no_grad()
+    def evaluate_multistep_rollout(
+        self,
+        data: Dict,
+        load_path: str,
+        idx_load_path: str,
+        horizons=[5, 10, 20, 50],
+        num_rollouts=100
+    ):
+        """
+        Evaluate multi-step rollout prediction error of the ensemble dynamics model.
+        Uses the same split indices as HNN-SDE for consistency.
 
-#     # rollout
-#     observations = init_obss
-#     for _ in range(rollout_length):
-#         if self._uniform_rollout:
-#             actions = np.random.uniform(
-#                 -1,
-#                 1,
-#                 size=(len(observations), self.action_dim)
-#             )
-#         else:
-#             actions = self.select_action(observations)
-#         next_observations, rewards, terminals, info = self.dynamics.step(observations, actions)
-#         rollout_transitions["obss"].append(observations)
-#         rollout_transitions["next_obss"].append(next_observations)
-#         rollout_transitions["actions"].append(actions)
-#         rollout_transitions["rewards"].append(rewards)
-#         rollout_transitions["terminals"].append(terminals)
+        Args:
+            data: dataset dictionary (obs, actions, next_obs, rewards, etc.)
+            load_path: path to load trained model
+            idx_load_path: path to train/holdout split indices
+            horizons: rollout horizons to test
+            num_rollouts: number of random rollouts to evaluate
 
-#         # tracks how many total transitions (not timesteps) were collected
-#         # since batch size may shrink over time after filtering terminal states
-#         # num_transitions is a sum of all transitions collected across all surviving batches
-#         # which is not the same as (rollout_length × initial_batch_size),
-#         # because some episodes terminate early and are excluded from later steps.
-#         num_transitions += len(observations)
-#         rewards_arr = np.append(rewards_arr, rewards.flatten())
+        Returns:
+            mse_dict: {horizon: { "state_mse": mean ± std, "reward_mse": mean ± std }}
+        """
+        print("Doing multi-step rollout evaluation...")
+        # Load trained model
+        # self.load(load_path)
+        self.model.eval()
 
-#         nonterm_mask = (~terminals).flatten()
-#         if nonterm_mask.sum() == 0:
-#             break
+        # Format dataset
+        inputs, targets = self.format_samples_for_training(data)
 
-#         # print(observations.shape)
-#         # print(next_observations.shape)
-#         # print(rewards.shape)
-#         # print(terminals.shape)
-#         observations = next_observations[nonterm_mask]
+        obss, actions, next_obss, rewards = (
+            data["observations"],
+            data["actions"],
+            data["next_observations"],
+            data["rewards"].reshape(-1, 1),
+        )
+        data_size = obss.shape[0]
 
-#     for k, v in rollout_transitions.items():
-#         rollout_transitions[k] = np.concatenate(v, axis=0)
+        # WE DON'T NEED TO CONCAT AND SCALE OBS & ACTION HERE, 
+        # IT IS ALREADY HAPPENING IN THE STEP METHOD 
+        # Use the SAME split indices as HNN-SDE
+        # train_idx = np.load(os.path.join(idx_load_path, "train_idx.npy"))
+        holdout_idx = np.load(os.path.join(idx_load_path, "holdout_idx.npy"))
+        # train_inputs, train_targets = inputs[train_idx], targets[train_idx]
+        # holdout_inputs, holdout_targets = inputs[holdout_idx], targets[holdout_idx]
+        # Scaling holdout data
+        # holdout_inputs = self.scaler.transform(holdout_inputs)
 
-#     return rollout_transitions, \
-#         {"num_transitions": num_transitions, "reward_mean": rewards_arr.mean()}
+        obss = obss[holdout_idx]
+        actions = actions[holdout_idx]
+        next_obss = next_obss[holdout_idx]
+        rewards = rewards[holdout_idx]
+
+        mse_dict = {}
+
+        for horizon in horizons:
+            rollout_s_preds_all, rollout_s_truth_all = [], []
+            rollout_r_preds_all, rollout_r_truth_all = [], []
+
+            for _ in range(num_rollouts):
+                # Sample a random start index (make sure we have horizon steps ahead)
+                idx = np.random.randint(0, len(obss) - horizon - 1)
+
+                s_seq = obss[idx : idx + horizon + 1]   # ground-truth states
+                a_seq = actions[idx : idx + horizon]    # ground-truth actions
+                r_seq = rewards[idx+1 : idx+horizon+1]  # ground-truth rewards
+
+                rollout_s_truth = s_seq[1:]  # true rollout (s1..sH)
+                s_pred = s_seq[0:1]          # start from s0
+
+                rollout_s_pred, rollout_r_pred = [], []
+                for t in range(horizon):
+                    # One ensemble forward step
+                    next_s_pred, r_pred, _, _ = self.step(s_pred, a_seq[t:t+1])
+
+                    rollout_s_pred.append(torch.tensor(next_s_pred.squeeze(0)))
+                    rollout_r_pred.append(torch.tensor(r_pred.squeeze(0)))
+
+                    # Feed prediction back in (closed-loop rollout)
+                    s_pred = next_s_pred
+
+                rollout_s_preds_all.append(torch.stack(rollout_s_pred))
+                rollout_r_preds_all.append(torch.stack(rollout_r_pred))
+                rollout_s_truth_all.append(torch.tensor(rollout_s_truth))
+                rollout_r_truth_all.append(torch.tensor(r_seq))
+
+            # Stack results
+            rollout_s_preds_all = torch.stack(rollout_s_preds_all)   # [num_rollouts, H, state_dim]
+            rollout_s_truth_all = torch.stack(rollout_s_truth_all)
+            rollout_r_preds_all = torch.stack(rollout_r_preds_all)   # [num_rollouts, H, 1]
+            rollout_r_truth_all = torch.stack(rollout_r_truth_all)
+
+            # Compute rollout MSE
+            s_mse_per_rollout = F.mse_loss(
+                rollout_s_preds_all, rollout_s_truth_all, reduction="none"
+            ).mean(dim=(1, 2))  # average across horizon and features
+            r_mse_per_rollout = F.mse_loss(
+                rollout_r_preds_all, rollout_r_truth_all, reduction="none"
+            ).mean(dim=(1, 2))
+
+            mse_dict[horizon] = {
+                "state_mean": s_mse_per_rollout.mean().item(),
+                "state_std": s_mse_per_rollout.std().item(),
+                "reward_mean": r_mse_per_rollout.mean().item(),
+                "reward_std": r_mse_per_rollout.std().item(),
+            }
+
+            print(
+                f"Horizon={horizon}: "
+                f"State MSE = {mse_dict[horizon]['state_mean']:.6f} ± {mse_dict[horizon]['state_std']:.6f}, "
+                f"Reward MSE = {mse_dict[horizon]['reward_mean']:.6f} ± {mse_dict[horizon]['reward_std']:.6f}"
+            )
+
+        return mse_dict
+
+
+    # def rollout(init_obss: np.ndarray, rollout_length: int) -> Tuple[Dict[str, np.ndarray], Dict]:
+    #     num_transitions = 0
+    #     rewards_arr = np.array([])
+    #     rollout_transitions = defaultdict(list)
+
+    #     # rollout
+    #     observations = init_obss
+    #     for _ in range(rollout_length):
+    #         if self._uniform_rollout:
+    #             actions = np.random.uniform(
+    #                 -1,
+    #                 1,
+    #                 size=(len(observations), self.action_dim)
+    #             )
+    #         else:
+    #             actions = self.select_action(observations)
+    #         next_observations, rewards, terminals, info = self.dynamics.step(observations, actions)
+    #         rollout_transitions["obss"].append(observations)
+    #         rollout_transitions["next_obss"].append(next_observations)
+    #         rollout_transitions["actions"].append(actions)
+    #         rollout_transitions["rewards"].append(rewards)
+    #         rollout_transitions["terminals"].append(terminals)
+
+    #         # tracks how many total transitions (not timesteps) were collected
+    #         # since batch size may shrink over time after filtering terminal states
+    #         # num_transitions is a sum of all transitions collected across all surviving batches
+    #         # which is not the same as (rollout_length × initial_batch_size),
+    #         # because some episodes terminate early and are excluded from later steps.
+    #         num_transitions += len(observations)
+    #         rewards_arr = np.append(rewards_arr, rewards.flatten())
+
+    #         nonterm_mask = (~terminals).flatten()
+    #         if nonterm_mask.sum() == 0:
+    #             break
+
+    #         # print(observations.shape)
+    #         # print(next_observations.shape)
+    #         # print(rewards.shape)
+    #         # print(terminals.shape)
+    #         observations = next_observations[nonterm_mask]
+
+    #     for k, v in rollout_transitions.items():
+    #         rollout_transitions[k] = np.concatenate(v, axis=0)
+
+    #     return rollout_transitions, \
+    #         {"num_transitions": num_transitions, "reward_mean": rewards_arr.mean()}
 
 def train_dynamics_model():
     import argparse
@@ -526,7 +651,7 @@ def train_dynamics_model():
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", type=str, default="aliengo")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--retrain", type=bool, default=True)
+    parser.add_argument("--retrain", type=bool, default=False)
     parser.add_argument("--obs_dim", type=int, default=58)
     parser.add_argument("--action_dim", type=int, default=12)
     parser.add_argument("--dynamics-lr", type=float, default=3e-4)
@@ -535,7 +660,9 @@ def train_dynamics_model():
     parser.add_argument("--n-ensemble", type=int, default=7)
     parser.add_argument("--n-elites", type=int, default=5)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument('--run-name', type=str, default=datetime.now().strftime("run_%Y%m%d-%H%M%S"), help='used for logging to distingush different runs')
+    # parser.add_argument('--run_name', type=str, default=datetime.now().strftime("run_%Y%m%d-%H%M%S"), help='used for logging to distingush different runs')
+    parser.add_argument('--run_name', type=str, default=f"20250926-233306", help='run name')
+    parser.add_argument('--indices_load_path', type=str, default=f"HNNSDE", help='used for logging')
 
     args = parser.parse_args()
 
@@ -566,8 +693,11 @@ def train_dynamics_model():
     torch.cuda.empty_cache()
 
     # Logger
-    log_dirs = make_log_dirs(args.task, 'test/dynamics', args.seed, vars(args), run_name=args.run_name)
+    log_dirs = make_log_dirs(args.task, 'dynamics_run', args.seed, vars(args), run_name=args.run_name)
+    idx_load_path = make_log_dirs(args.task, 'dynamics', args.seed, vars(args), run_name=args.indices_load_path)
     print(f"log_dirs = {log_dirs}")
+    print(f"indices_load_path = {idx_load_path}")
+
     output_config = {
         "consoleout_backup": "stdout",
         "policy_training_progress": "csv",
@@ -600,7 +730,7 @@ def train_dynamics_model():
     # when model already exists but still we want retraining,
     # we can set it to True
     # retrain = True
-    dynamic_model_path = os.path.join(logger.model_dir, f"dynamics_{args.seed}.pth")
+    dynamic_model_path = os.path.join(logger.model_dir, f"dynamics.pth")
     print(dynamic_model_path)
 
     # Aliengo Offline Data
@@ -623,13 +753,16 @@ def train_dynamics_model():
         print(f"Trained dynamics exists at {logger.model_dir}, loading...")
         dynamics.load(logger.model_dir)
         print("Load successful!!")
+
+        # MULTI-STEP ROLLOUT EVALUATION
+        dynamics.evaluate_multistep_rollout(data, dynamic_model_path, idx_load_path)
     else:
         # dynamic training
         print("Starting dynamics model training...")
         if use_wandb:
-            dynamics.train(data, logger, wandb=wandb)
+            dynamics.train(idx_load_path, data, logger, wandb=wandb)
         else:
-            dynamics.train(data, logger, tensorboard_writer=tensorboard_writer)
+            dynamics.train(idx_load_path, data, logger, tensorboard_writer=tensorboard_writer)
             tensorboard_writer.close()
 
 if __name__ == '__main__':
