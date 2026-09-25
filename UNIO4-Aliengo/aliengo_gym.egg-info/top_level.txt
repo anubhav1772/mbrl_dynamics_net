@@ -1,2 +1,0 @@
-aliengo_gym
-scripts
