@@ -26,7 +26,7 @@ from mbrl_dynamics_net.utils.state_features import StateFeatures
 from torch.utils.tensorboard import SummaryWriter
 
 from mbrl_dynamics_net.utils.analyze_features import get_dataset_stats
-from mbrl_dynamics_net.utils import logger 
+from mbrl_dynamics_net.utils import logger
 # Log directory path
 logger.set_root(os.path.join(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")), "log"))
 
@@ -35,7 +35,7 @@ import wandb
 import joblib
 
 class AutoEncoder(nn.Module):
-    def __init__(self, input_dim, latent_dim) -> None:  
+    def __init__(self, input_dim, latent_dim) -> None:
         super(AutoEncoder, self).__init__()
         assert latent_dim % 2 == 0, "latent_dim must be even for q, p split"
 
@@ -73,7 +73,7 @@ class AutoEncoder(nn.Module):
             (q, p): canonical split of latent
             u: full latent vector [q, p]
         """
-        u = self.encoder(s)               
+        u = self.encoder(s)
 
         # Decoding: Canonical states back to the state
         s_reconstructed = self.decoder(u)
@@ -82,10 +82,8 @@ class AutoEncoder(nn.Module):
         return s_reconstructed, (q, p), u
 
     def encode(self, s):
-        """Encode physics state into latent [q, p]."""
-        u = self.encoder(s)
-        q, p = torch.chunk(u, 2, dim=-1)
-        return q, p, u
+        """Encode physics state into latent state u."""
+        return self.encoder(s)
 
     def decode(self, u):
         """Decode latent [q, p] back to physics state."""
@@ -196,11 +194,11 @@ class ActionSDE(SDEStratonovich):
         self.sde_type = base_sde.sde_type
         self.base_sde = base_sde
         self.a_t = a_t
-        self.c_t = c_t    
+        self.c_t = c_t
 
     def f(self, t, u):
         return self.base_sde.hamiltonian_drift(t, u, self.a_t, self.c_t)
-    
+
     def g(self, t, u):
         return self.base_sde.stochastic_diffusion(t, u, self.a_t, self.c_t)
 
@@ -260,7 +258,7 @@ class HNNSDE(nn.Module):
             dt           : Integration step size
         """
 
-        # Split state into physics vs. context 
+        # Split state into physics vs. context
         dof_pos_idx = self.features["dof_pos"]   # slice(18, 30)
         dof_vel_idx = self.features["dof_vel"]   # slice(30, 42)
 
@@ -271,7 +269,7 @@ class HNNSDE(nn.Module):
 
         # Physics-only autoencoder
         physics_s_t = torch.cat([s_t[:, dof_pos_idx], s_t[:, dof_vel_idx]], dim=-1)
-        q, p, u = self.autoencoder.encode(physics_s_t)
+        u = self.autoencoder.encode(physics_s_t)
 
         # Context = all features except physics
         context_mask = torch.ones(s_t.shape[1], dtype=torch.bool, device=s_t.device)
@@ -279,7 +277,7 @@ class HNNSDE(nn.Module):
         context_mask[dof_vel_idx] = False
         c_t = s_t[:, context_mask]  # [batch, context_dim]
 
-        # Predict reward (conditioned on physics, action, context) 
+        # Predict reward (conditioned on physics, action, context)
         r_pred = self.reward_decoder(u, a_t, c_t)
 
         # Integrate Hamiltonian SDE forward
@@ -297,14 +295,15 @@ class HNNSDE(nn.Module):
         )
 
         u_next = u_traj[-1]  # [batch, 24]
-        q_next, p_next = torch.chunk(u_next, 2, dim=-1)
+        # q_next, p_next = torch.chunk(u_next, 2, dim=-1)
+        physics_next = self.autoencoder.decode(u_next)
 
         # Reconstruct full next state (58D)
         s_tp1_pred = s_t.clone()
 
         # Update physics
-        s_tp1_pred[:, dof_pos_idx] = q_next
-        s_tp1_pred[:, dof_vel_idx] = p_next
+        s_tp1_pred[:, dof_pos_idx] = physics_next[:, :12]
+        s_tp1_pred[:, dof_vel_idx] = physics_next[:, 12:]
 
         # Update "prev_action" slot in context with current
         prev_action_idx = self.features["actions"]
@@ -326,7 +325,7 @@ class HNNSDE(nn.Module):
     #     """
 
     #     # Encode observation to canonical (q, p) and full latent u
-    #     q, p, u = self.autoencoder.encode(s_t)
+    #     u = self.autoencoder.encode(s_t)
 
     #     # Predict reward from q, p, and a_t
     #     r_pred = self.reward_decoder(q, p, a_t)
@@ -346,7 +345,7 @@ class HNNSDE(nn.Module):
     #                     t_span,                     # tensor([0., dt])
     #                     method='heun',              # Milstein/Heun for Stratonovich
     #                     dt=dt,                      # integration step
-    #                     # names={'drift': 'f', 
+    #                     # names={'drift': 'f',
     #                     #        'diffusion': 'g'},   # match torchsde API
     #                     # args=(a_t,),                # pass action to drift & diffusion
     #                 )
@@ -370,7 +369,7 @@ class HNNSDE(nn.Module):
         s_pred_mean = torch.stack(rollout_preds, dim=0).mean(dim=0)
         r_pred_mean = torch.stack(reward_preds, dim=0).mean(dim=0)
 
-        # Physics indices (pos + vel only) 
+        # Physics indices (pos + vel only)
         dof_pos_idx = self.features["dof_pos"]               # slice(18, 30)
         dof_vel_idx = self.features["dof_vel"]               # slice(30, 42)
 
@@ -378,13 +377,13 @@ class HNNSDE(nn.Module):
         physics_tp1_true = torch.cat([s_tp1_true[:, dof_pos_idx], s_tp1_true[:, dof_vel_idx]], dim=-1)
 
         # Encode/decode physics state for reconstruction
-        _, _, u = self.autoencoder.encode(physics_t)         # input only pos+vel
+        u = self.autoencoder.encode(physics_t)               # input only pos+vel
         physics_recon = self.autoencoder.decode(u)           # reconstruct pos+vel
         loss_recon = F.mse_loss(physics_recon, physics_t)
 
         # State prediction loss (only on physics part)
-        u_pred = torch.cat([s_pred_mean[:, dof_pos_idx], s_pred_mean[:, dof_vel_idx]], dim=-1)
-        loss_state = F.mse_loss(u_pred, physics_tp1_true)
+        physics_pred = torch.cat([s_pred_mean[:, dof_pos_idx], s_pred_mean[:, dof_vel_idx]], dim=-1)
+        loss_state = F.mse_loss(physics_pred, physics_tp1_true)
 
         # Reward loss
         reward_loss_fn = nn.SmoothL1Loss()
@@ -405,16 +404,16 @@ class HNNSDETrainer:
         self.alpha = alpha
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
         self.log_dirs = log_dirs
-        
+
         # Prepare data for batching (convert numpy arrays to torch tensors)
         obss, actions, next_obss, rewards = self.model.format_samples_for_training(data)
-        
+
         # self.dataset =  TensorDataset(torch.tensor(obss, dtype=torch.float32),
         #                                 torch.tensor(actions, dtype=torch.float32),
         #                                 torch.tensor(next_obss, dtype=torch.float32),
         #                                 torch.tensor(rewards, dtype=torch.float32))
 
-        # Indices of constant features to drop 
+        # Indices of constant features to drop
         # [gait (8-10), durations (11), body_roll (14), stance_width (15), stance_length (16), aux_reward (17)]
         # constant_idx = [8, 9, 10, 11, 14, 15, 16, 17]
         # # Remove constant features from observations
@@ -425,11 +424,11 @@ class HNNSDETrainer:
         holdout_size = min(int(data_size * holdout_ratio), 1000)
         train_size = data_size - holdout_size
 
-        # Initialize scalers 
+        # Initialize scalers
         # # StandardScaler for normalizing inputs
-        self.obs_scaler = StandardScaler(name="obs") 
-        self.act_scaler = StandardScaler(name="act") 
-        self.rew_scaler = StandardScaler(name="rew") 
+        self.obs_scaler = StandardScaler(name="obs")
+        self.act_scaler = StandardScaler(name="act")
+        self.rew_scaler = StandardScaler(name="rew")
 
         if retrain == True:
             # train_dataset, holdout_dataset = random_split(self.dataset, [train_size, holdout_size])
@@ -446,8 +445,8 @@ class HNNSDETrainer:
             np.save(os.path.join(log_dirs, "holdout_idx.npy"), holdout_idx)
 
             # # Fit scalers on train split only
-            self.obs_scaler.fit(obss[train_idx]) 
-            self.act_scaler.fit(actions[train_idx]) 
+            self.obs_scaler.fit(obss[train_idx])
+            self.act_scaler.fit(actions[train_idx])
             self.rew_scaler.fit(rewards[train_idx])
 
             # print(self.obs_scaler.mu, self.obs_scaler.std)
@@ -455,10 +454,10 @@ class HNNSDETrainer:
             # print(self.rew_scaler.mu, self.rew_scaler.std)
 
             # Transform all data with fitted scalers
-            # Both train + holdout 
-            obss = self.obs_scaler.transform(obss) 
-            actions = self.act_scaler.transform(actions) 
-            next_obss = self.obs_scaler.transform(next_obss) # same obs scaler 
+            # Both train + holdout
+            obss = self.obs_scaler.transform(obss)
+            actions = self.act_scaler.transform(actions)
+            next_obss = self.obs_scaler.transform(next_obss) # same obs scaler
             rewards = self.rew_scaler.transform(rewards)
 
         else:
@@ -468,9 +467,9 @@ class HNNSDETrainer:
             # print(self.act_scaler.mu, self.act_scaler.std)
             # print(self.rew_scaler.mu, self.rew_scaler.std)
 
-            obss = self.obs_scaler.transform(obss) 
-            actions = self.act_scaler.transform(actions) 
-            next_obss = self.obs_scaler.transform(next_obss) # same obs scaler 
+            obss = self.obs_scaler.transform(obss)
+            actions = self.act_scaler.transform(actions)
+            next_obss = self.obs_scaler.transform(next_obss) # same obs scaler
             rewards = self.rew_scaler.transform(rewards)
 
         self.train_dataset = TensorDataset(
@@ -479,7 +478,7 @@ class HNNSDETrainer:
             torch.tensor(next_obss[train_idx], dtype=torch.float32),
             torch.tensor(rewards[train_idx], dtype=torch.float32),
         )
-            
+
         self.holdout_dataset = TensorDataset(
             torch.tensor(obss[holdout_idx], dtype=torch.float32),
             torch.tensor(actions[holdout_idx], dtype=torch.float32),
@@ -507,7 +506,7 @@ class HNNSDETrainer:
             loss, loss_recon, loss_state, loss_reward = self.model.compute_loss(
                 obss, actions, next_obss, rewards, self.dt, self.alpha
             )
-            
+
             # Backpropagation and optimization
             loss.backward()
             self.optimizer.step()
@@ -516,7 +515,7 @@ class HNNSDETrainer:
             total_recon_loss += loss_recon.item()
             total_state_loss += loss_state.item()
             total_reward_loss += loss_reward.item()
-        
+
         mean_loss = total_loss / len(self.train_loader)
         mean_recon_loss = total_recon_loss / len(self.train_loader)
         mean_state_loss = total_state_loss / len(self.train_loader)
@@ -600,15 +599,15 @@ class HNNSDETrainer:
 
         return result
 
-    def train(self, 
-            num_epochs=1000, 
-            wandb = None, 
-            tensorboard_writer = None, 
+    def train(self,
+            num_epochs=1000,
+            wandb = None,
+            tensorboard_writer = None,
             patience=5,  # stop if no improvement for 20 epochs
             save_path="best_model.pth",
             improvement_threshold = 0.01, # 1% (how much "relative" improvement we require)
             ):
-    
+
         best_holdout_loss = float('inf')
         patience_counter = 0
         for epoch in range(num_epochs):
@@ -732,9 +731,9 @@ class HNNSDETrainer:
 
         data_size = obss.shape[0]
 
-        obss = self.obs_scaler.transform(obss) 
-        actions = self.act_scaler.transform(actions) 
-        next_obss = self.obs_scaler.transform(next_obss) # same obs scaler 
+        obss = self.obs_scaler.transform(obss)
+        actions = self.act_scaler.transform(actions)
+        next_obss = self.obs_scaler.transform(next_obss) # same obs scaler
 
         obss = torch.tensor(obss, dtype=torch.float32).to(self.device)
         actions = torch.tensor(actions, dtype=torch.float32).to(self.device)
@@ -744,7 +743,7 @@ class HNNSDETrainer:
 
         for horizon in horizons:
             rollout_preds_all, rollout_truth_all = [], []
-            
+
             # collect rollouts
             for _ in range(num_rollouts):
                 # Random starting index (ensure enough horizon steps ahead exist)
@@ -759,7 +758,7 @@ class HNNSDETrainer:
                 # Predict rollout
                 s_pred = s_seq[0].unsqueeze(0)            # initial state [1, state_dim]
                 rollout_pred = []
-                
+
                 for t in range(horizon):
                     # allow gradients inside predict_state_reward (Hamiltonian dynamics needs autograd)
                     s_pred, _ = self.model.predict_state_reward(s_pred, a_seq[t].unsqueeze(0), self.dt)
@@ -774,7 +773,7 @@ class HNNSDETrainer:
                 # Normalized/Scaled Space
                 rollout_preds_all = torch.stack(rollout_preds_all)   # [num_rollouts, horizon, state_dim]
                 rollout_truth_all = torch.stack(rollout_truth_all)   # [num_rollouts, horizon, state_dim]
-                # Compute scaled-space error 
+                # Compute scaled-space error
                 mse_rollout_norm = F.mse_loss(rollout_preds_all, rollout_truth_all)
 
                 mse_dict[horizon] = mse_rollout_norm
@@ -787,7 +786,7 @@ class HNNSDETrainer:
         Evaluate multi-step rollout prediction error of the dynamics model.
         Returns both mean and variance across multiple rollouts.
 
-        ######## HOLDOUT DATASET USED ######## 
+        ######## HOLDOUT DATASET USED ########
 
         Args:
             horizons: list of rollout horizons to test
@@ -799,11 +798,11 @@ class HNNSDETrainer:
             }}
         """
         # gait, durations, body_roll, stance_width, stance_length, aux_reward
-        self.constant_idx = [8, 9, 10, 11, 14, 15, 16, 17]  
+        self.constant_idx = [8, 9, 10, 11, 14, 15, 16, 17]
 
         self.model.eval()
 
-        # Unpack tensors from self.holdout_dataset 
+        # Unpack tensors from self.holdout_dataset
         obss, actions, next_obss, rewards = [
             tensor.clone().to(self.device) for tensor in self.holdout_dataset.tensors
         ]
@@ -896,12 +895,12 @@ class HNNSDETrainer:
                 #self.plot_global_rollout_error_curve(rollout_s_preds_all, rollout_s_truth_all, horizons)
                 # Reward
                 #self.plot_global_rollout_error_curve(rollout_r_preds_all, rollout_r_truth_all, horizons, title="Global Reward Rollout Error Curve"               # Plot featurewise errors
-                
+
                 self.plot_global_state_reward_error_curves(rollout_s_preds_all, rollout_s_truth_all, rollout_r_preds_all, rollout_r_truth_all, horizons)
 
                 # Computed in real/unnormalized space
                 # self.plot_featurewise_rollout_errors(rollout_s_preds_real, rollout_s_truth_real, horizons, save_csv_path="featurewise_mse.csv")
-                self.plot_featurewise_rollout_errors(rollout_s_preds_real, rollout_s_truth_real, horizons, 
+                self.plot_featurewise_rollout_errors(rollout_s_preds_real, rollout_s_truth_real, horizons,
                                                     reward_preds=rollout_r_preds_real,
                                                     reward_truth=rollout_r_truth_real,
                                                     save_csv_path="featurewise_mse.csv")
@@ -950,7 +949,7 @@ class HNNSDETrainer:
         plt.legend()
         plt.show()
 
-    def plot_featurewise_rollout_errors(self, preds, truth, horizons, 
+    def plot_featurewise_rollout_errors(self, preds, truth, horizons,
                                         reward_preds=None, reward_truth=None, save_csv_path=None):
         """
         Feature-wise error plots
@@ -1225,7 +1224,7 @@ def train_dynamics_model():
     parser.add_argument("--preprocess", type=bool, default=True)
     parser.add_argument('--run_name', type=str, default=f"HNNSDE_{datetime.now().strftime('%Y%m%d_%H%M%S')}", help='used for logging to distingush different runs')
     # parser.add_argument('--run_name', type=str, default=f"HNNSDE", help='used for logging')
-    parser.add_argument('--retrain', type=bool, default=True, help='flag to initiate training')
+    parser.add_argument('--retrain', type=bool, default=False, help='flag to initiate training')
     parser.add_argument('--horizons', type=int, nargs='*', default=[20], help='List of rollout horizons to test')
 
     args = parser.parse_args()
@@ -1290,32 +1289,32 @@ def train_dynamics_model():
         tensorboard_writer = SummaryWriter(log_dir=os.path.join(log_dirs, "tensorboard"))
 
         model = HNNSDE(args.input_dim, args.latent_dim, args.action_dim, args.context_dim, args.force_mode, device=args.device)
-        hnnsde_trainer = HNNSDETrainer(model, data, 
-                              batch_size=args.batch_size, 
-                              lr=args.lr, 
-                              dt=args.dt, 
+        hnnsde_trainer = HNNSDETrainer(model, data,
+                              batch_size=args.batch_size,
+                              lr=args.lr,
+                              dt=args.dt,
                               alpha=args.alpha,
-                              log_dirs=log_dirs, 
+                              log_dirs=log_dirs,
                               retrain=args.retrain,
-                              device=args.device)        
+                              device=args.device)
 
         if args.retrain or not os.path.isfile(os.path.join(log_dirs, "best_model.pth")):
             print("Training from scratch...")
 
             if use_wandb:
                 hnnsde_trainer.train(
-                    num_epochs=args.num_epochs, 
-                    wandb=wandb, 
+                    num_epochs=args.num_epochs,
+                    wandb=wandb,
                     save_path=log_dirs
                 )
             else:
                 hnnsde_trainer.train(
-                    num_epochs=args.num_epochs, 
+                    num_epochs=args.num_epochs,
                     tensorboard_writer=tensorboard_writer,
                     save_path=log_dirs
                 )
                 # Ensures all logs are written
-                tensorboard_writer.flush()   
+                tensorboard_writer.flush()
                 tensorboard_writer.close()
 
         else:
@@ -1327,7 +1326,7 @@ def train_dynamics_model():
     #     print(f"{k}: {v:.6f}")
 
     # mse_dict = noda_trainer.evaluate_multistep_rollout(horizons=args.horizons, num_rollouts=50)
-    
+
     # mse_rollout_norm, mse_rollout_real = [], []
     # for v in mse_dict.values():
     #     mse_rollout_norm.append(v[0].item())
@@ -1358,13 +1357,13 @@ def train_dynamics_model():
 
     # noda_trainer.plot_rollout_mse_with_variance(args.horizons, scaled_stats, num_rollouts=20)
 
-    # stats_df = noda_trainer.evaluate_with_stats(dataset_stats=get_dataset_stats()) 
+    # stats_df = noda_trainer.evaluate_with_stats(dataset_stats=get_dataset_stats())
     # print(stats_df)
 
 
     # Encode state
     # q, p, u = autoencoder.encode(s_t)
-     
+
     # actions           (12,)
     # observations      (58,)
     # next_observations (58,)
